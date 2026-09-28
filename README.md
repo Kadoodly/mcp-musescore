@@ -1,5 +1,7 @@
 # MuseScore MCP
 
+> Based on [ghchen99/mcp-musescore](https://github.com/ghchen99/mcp-musescore). The changes in this repository were written with AI assistance (see [AI disclosure](#ai-disclosure)).
+
 Let Claude read, compose, arrange and edit the score open in **MuseScore Studio 4.7+**. A MuseScore plugin exposes the score over a local WebSocket, and an MCP server gives Claude (Claude Desktop or any MCP client) 70 tools to work with it while you keep editing in MuseScore.
 
 The code, full documentation and tests are in [`mcp-musescore-main/`](mcp-musescore-main/). The full setup guide and tool list are in [its README](mcp-musescore-main/README.md) and [tools.md](mcp-musescore-main/skills/mcp-musescore/references/tools.md).
@@ -37,3 +39,7 @@ The plugin was checked against the MuseScore 4.7.5 source, and there are offline
 ## Credits
 
 A fork of [ghchen99/mcp-musescore](https://github.com/ghchen99/mcp-musescore), extended with the compact notation, score versions, range editing and the tests. MIT License (see [LICENSE](mcp-musescore-main/LICENSE)).
+
+## AI disclosure
+
+The changes made here to the original project (code, tests and documentation) were written with AI assistance: Claude, by Anthropic, working in Claude Code. The repository owner directed the work and ran the live tests in MuseScore. Commits made this way carry a `Co-Authored-By: Claude` line. Review the code before relying on it, as you would any contribution.

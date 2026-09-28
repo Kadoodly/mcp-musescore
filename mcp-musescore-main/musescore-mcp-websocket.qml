@@ -1868,11 +1868,20 @@ MuseScore {
     }
 
     // Adds a text-like element (expression/staff/system text, chord symbol) at t.
+    // A chord symbol gets its text only once it is in the score: setting the
+    // text of a Harmony that has no parent yet crashes MuseScore 4.7.5
+    // (Harmony::setProperty(TEXT) calls explicitParent()->isFretDiagram(), and
+    // explicitParent() is null until the element is added).
     function putText(t, elementType, text) {
         ensureSegment(t);
         var c = makeCursor(t);
         requireSegment(c, t);
         var el = newElement(elementType);
+        if (elementType === Element.HARMONY) {
+            c.add(el);
+            el.text = text;
+            return;
+        }
         el.text = text;
         c.add(el);
     }

@@ -949,7 +949,25 @@ class MockMuseScore {
             Element, Segment: SegmentType, Cursor: { SCORE_START: 0, SELECTION_START: 1, SELECTION_END: 2 },
             Lyrics: { SINGLE: 0, BEGIN: 1, END: 2, MIDDLE: 3 }, DynamicType, MarkerType: {}, KeyMode: { MAJOR: 1, MINOR: 0 },
             Tid, ClefType, LayoutBreak, SymId,
-            newElement(type) { return type === Element.NOTE ? { __newNote: true, type, pitch: 60 } : { type }; },
+            newElement(type) {
+                if (type === Element.NOTE) return { __newNote: true, type, pitch: 60 };
+                if (type === Element.HARMONY) {
+                    // Harmony::setProperty(TEXT) calls explicitParent()->isFretDiagram(): with no
+                    // parent yet (not added to the score) MuseScore 4.7.5 crashes (seen live)
+                    const el = { type };
+                    let text = '';
+                    Object.defineProperty(el, 'text', {
+                        enumerable: true,
+                        get() { return text; },
+                        set(v) {
+                            if (el.id === undefined) throw new Error('mock: setting the text of a chord symbol that is not in the score crashes MuseScore 4.7.5');
+                            text = v;
+                        },
+                    });
+                    return el;
+                }
+                return { type };
+            },
             removeElement(el) { eng.removeElement(el); },
             readScore(p) { eng.log.push('readScore ' + p); return null; },
             writeScore(s, p, ext) {

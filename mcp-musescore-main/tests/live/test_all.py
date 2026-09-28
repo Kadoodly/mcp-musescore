@@ -357,10 +357,19 @@ class AllFeatures:
         assert f"bars {bar}" in changes and "mcp: writeVoice" in changes, changes
         detail = f"v{v0} -> v{v1}, stale expected_version refused"
         if self.interactive:
-            print(f"\n  >>> In MuseScore, click the note in bar {bar} on the top staff and press the Up arrow key "
-                  f"(another pitch), then press Enter here.")
-            await asyncio.get_running_loop().run_in_executor(None, input)
-            changes = await lv.tool("get_changes_since", version=v1)
+            # Select the note (the selection follows the cursor), so MuseScore shows where to press
+            await lv.tool("go_to_measure", measure=bar, staff=0, voice=0)
+            for attempt in (1, 2):
+                print(f"\n  >>> In MuseScore, click the whole note C5 at the start of bar {bar} on the top staff "
+                      f"(it turns blue),\n      press the Up arrow key once (it becomes C#5), then come back here "
+                      f"and press Enter.")
+                await asyncio.get_running_loop().run_in_executor(None, input)
+                changes = await lv.tool("get_changes_since", version=v1)
+                if "user: edited in MuseScore" in changes:
+                    break
+                now = bar_lines(await self.view(bar, staves=[0]), bar).get("s0", "")
+                print(f"      Nothing changed: bar {bar} is still {now!r}. The Up arrow has to go to MuseScore "
+                      f"with the note selected (a selected rest only moves up on the staff).")
             assert "user: edited in MuseScore" in changes and f"bars {bar}" in changes, changes
             detail += "; your edit was noticed"
         return detail

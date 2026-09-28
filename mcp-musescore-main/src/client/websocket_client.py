@@ -88,10 +88,10 @@ class MuseScoreClient:
                     return {"error": "Not connected to MuseScore"}
 
             try:
-                logger.info(f"Sending command: {payload}")
+                logger.debug("Sending command: %s", payload[:2000])
                 await self.websocket.send(payload)
                 response = await self.websocket.recv()
-                logger.info(f"Received response: {response}")
+                logger.debug("Received response: %s", response[:2000])
                 return json.loads(response)
             except Exception as e:
                 last_error = str(e)

@@ -18,6 +18,14 @@ from src.tools import (
     setup_time_tempo_tools,
 )
 
+# Log output goes to stderr, which is a pipe when Claude Desktop runs the
+# server: on Windows it would use cp1252 and fail on symbols like the note
+# signs in tempo marks.
+try:
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass
+
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,

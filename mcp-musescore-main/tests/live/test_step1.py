@@ -544,6 +544,11 @@ async def main():
     parser.add_argument("--cleanup", action="store_true", help="delete the appended bars at the end")
     args = parser.parse_args()
 
+    # Results can contain note signs (♩); never fail printing them
+    try:
+        sys.stdout.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
     check_window_title()
     import server
     logging.getLogger("MuseScoreMCP.Client").setLevel(logging.WARNING)

@@ -12,7 +12,9 @@ needs_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
 
 
 def run_node(*args, stdin=None):
-    return subprocess.run([NODE, *args], cwd=ROOT, input=stdin, capture_output=True, text=True, timeout=120)
+    # node writes UTF-8; Windows would otherwise decode pipes as cp1252
+    return subprocess.run([NODE, *args], cwd=ROOT, input=stdin, capture_output=True, text=True, encoding="utf-8",
+                          timeout=120)
 
 
 @pytest.fixture(scope="session")
@@ -55,7 +57,8 @@ class MockPluginClient:
 
     def __init__(self, **opts):
         self.proc = subprocess.Popen([NODE, "tests/js/mock_server.js", json.dumps(opts)], cwd=ROOT,
-                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8",
+                                     bufsize=1)
         self.sent = []
 
     def _roundtrip(self, message):

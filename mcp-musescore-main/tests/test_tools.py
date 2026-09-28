@@ -75,7 +75,7 @@ def test_tool_count_and_every_tool_documented(server):
     names = [t.name for t in tools(app)]
     assert len(names) == 71
     assert "write_voice" in names
-    doc = TOOLS_MD.read_text()
+    doc = TOOLS_MD.read_text(encoding="utf-8")
     assert "currently registers 71 public tools" in doc
     missing = [n for n in names if f"`{n}`" not in doc]
     assert not missing, f"tools.md doesn't mention {missing}"

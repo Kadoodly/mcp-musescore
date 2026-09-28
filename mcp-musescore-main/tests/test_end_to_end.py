@@ -71,6 +71,8 @@ ROUND_TRIPS = [
     "F#4:q Gb4 A#4 Bb4",
     "r:e C4:e~ C4:q r:h",
     "Eb5:s D5 C5 Bb4 Ab4:e G4 F4:q.(accent tenuto) Eb4:e",
+    "C5:q(trill) D5(up-bow down-bow) E5(turn short-trill) F5(mordent harmonic)",
+    "C4:e. D4:s E4:e.. F4:t G4:h",
 ]
 
 

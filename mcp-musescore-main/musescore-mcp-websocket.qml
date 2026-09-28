@@ -92,7 +92,7 @@ MuseScore {
         "ping", "getScore", "syncStateToSelection", "getCursorInfo", "setCursor", "goToMeasure",
         "goToBeginningOfScore", "goToFinalMeasure", "nextElement", "prevElement", "nextStaff", "prevStaff",
         "selectCurrentMeasure", "selectCustomRange", "getVersion", "getChangesSince", "getSelection",
-        "checkScore", "exportScore", "saveScore"
+        "checkScore", "exportScore", "saveScore", "openScore"
     ]
 
     function isEdit(command) {
@@ -188,12 +188,13 @@ MuseScore {
         "addArticulation": ["type", "startTick", "endTick", "startMeasure", "endMeasure", "staff"],
         "deleteMeasures": ["startMeasure", "endMeasure"],
         "copyMeasures": ["startMeasure", "endMeasure", "toMeasure", "insert", "staff", "toStaff", "transpose"],
-        "addInstrument": ["instrumentId"],
+        "addInstrument": ["instrumentId", "position"],
+        "setInstrumentName": ["staff", "part", "name", "shortName"],
         "removeInstrument": ["part", "staff"],
         "setStaffMute": ["staff", "mute"],
         "setInstrumentSound": ["staff", "instrumentId"],
         "setTimeSignature": ["numerator", "denominator", "measure"],
-        "transpose": ["semitones", "startMeasure", "endMeasure", "startTick", "endTick", "staves", "voices"],
+        "transpose": ["semitones", "startMeasure", "endMeasure", "startTick", "endTick", "staves", "voices", "chordSymbols", "keySignatures"],
         "clearRange": ["startMeasure", "endMeasure", "startTick", "endTick", "staves", "voices", "markings"],
         "replaceSection": ["startMeasure", "endMeasure", "parts", "clearOtherVoices"],
         "addText": ["text", "kind", "staff", "voice", "measure", "tick", "offset"],
@@ -207,7 +208,8 @@ MuseScore {
         "saveScore": [],
         "redo": ["steps"],
         "getSelection": [],
-        "checkScore": []
+        "checkScore": [],
+        "openScore": ["path"]
     })
 
     // Throws unless the command is {action, params} with a known action and
@@ -300,6 +302,7 @@ MuseScore {
             case "removeInstrument":        return removeInstrument(params);
             case "setStaffMute":            return setStaffMute(params);
             case "setInstrumentSound":      return setInstrumentSound(params);
+            case "setInstrumentName":       return setInstrumentName(params);
             case "setTimeSignature":        return setTimeSignature(params);
 
             // Range operations and score tools
@@ -318,6 +321,7 @@ MuseScore {
             case "redo":                    return redo(params);
             case "getSelection":            return getSelection(params);
             case "checkScore":              return checkScore(params);
+            case "openScore":               return openScore(params);
 
             default:
                 throw new Error("Unknown command: " + command.action);
@@ -1027,7 +1031,7 @@ MuseScore {
         "goToFinalMeasure", "nextElement", "prevElement", "nextStaff", "prevStaff",
         "selectCurrentMeasure", "selectCustomRange", "setTimeSignature", "setTempo",
         "addDynamic", "addFermata", "addInstrument", "removeInstrument", "setStaffMute",
-        "setInstrumentSound", "undo",
+        "setInstrumentSound", "setInstrumentName", "undo",
         "addRepeat", "removeRepeat", "addMarker", "addJump", "addRehearsalMark",
         "setKeySignature", "addGradualTempoChange", "removeMarking", "addSlur", "addHairpin",
         "addArticulation", "deleteMeasures", "copyMeasures",
@@ -1468,7 +1472,15 @@ MuseScore {
         "staccato": "articStaccatoAbove", "staccatissimo": "articStaccatissimoAbove", "tenuto": "articTenutoAbove",
         "accent": "articAccentAbove", "marcato": "articMarcatoAbove", "portato": "articTenutoStaccatoAbove",
         "accent-staccato": "articAccentStaccatoAbove", "marcato-staccato": "articMarcatoStaccatoAbove",
-        "stress": "articStressAbove", "unstress": "articUnstressAbove"
+        "stress": "articStressAbove", "unstress": "articUnstressAbove",
+        "up-bow": "stringsUpBow", "down-bow": "stringsDownBow", "harmonic": "stringsHarmonic",
+        "snap-pizzicato": "pluckedSnapPizzicatoAbove", "open": "brassMuteOpen", "stopped": "brassMuteClosed"
+    })
+
+    // Ornaments are their own element type (added to the chord like articulations)
+    property var ornamentSymbols: ({
+        "trill": "ornamentTrill", "mordent": "ornamentMordent", "short-trill": "ornamentShortTrill",
+        "turn": "ornamentTurn", "inverted-turn": "ornamentTurnInverted"
     })
 
     // The markings an event may carry, checked.
@@ -1484,8 +1496,9 @@ MuseScore {
             if (!Array.isArray(ev.articulations)) throw new Error(where + ": articulations must be a list");
             for (var i = 0; i < ev.articulations.length; i++) {
                 var a = ev.articulations[i];
-                if (a !== "fermata" && !hasKey(articulationSymbols, a)) {
-                    throw new Error(where + ": unknown articulation '" + a + "' (known: fermata, " + Object.keys(articulationSymbols).join(", ") + ")");
+                if (a !== "fermata" && !hasKey(articulationSymbols, a) && !hasKey(ornamentSymbols, a)) {
+                    throw new Error(where + ": unknown articulation '" + a + "' (known: fermata, " + Object.keys(articulationSymbols).join(", ") +
+                                    ", " + Object.keys(ornamentSymbols).join(", ") + ")");
                 }
                 if (isRest && a !== "fermata") throw new Error(where + ": a rest can only have a fermata, not " + a);
             }
@@ -1872,8 +1885,9 @@ MuseScore {
                 if (!findAnnotation(c.segment, Element.FERMATA, t.staff * 4 + t.voice)) c.add(newElement(Element.FERMATA));
                 continue;
             }
-            var art = newElement(Element.ARTICULATION);
-            art.symbol = SymId[articulationSymbols[names[i]]];
+            var orn = hasKey(ornamentSymbols, names[i]);
+            var art = newElement(orn ? Element.ORNAMENT : Element.ARTICULATION);
+            art.symbol = SymId[orn ? ornamentSymbols[names[i]] : articulationSymbols[names[i]]];
             c.add(art);
         }
     }
@@ -2326,6 +2340,86 @@ MuseScore {
     // tpc change for a transposition by n semitones (C -> Db for +1, C -> D for +2, ...)
     property var tpcShiftBySemitone: [0, -5, 2, -3, 4, -1, 6, 1, -4, 3, -2, 5]
 
+    // Concert key (fifths) of a staff at tick. Staff.key() is the written
+    // key (KeySigEvent::key); for a transposing instrument the concert key is
+    // that moved back by the instrument's interval: 7 * chromatic - 12 * diatonic
+    // fifths (Bb clarinet: written D major = concert C major).
+    function concertKeyAt(staffIdx, tick) {
+        var st = staffObj(staffIdx);
+        var f = fractionFromTicks(tick);
+        var k = st.key(f);
+        try {
+            var iv = st.transpose(f);
+            if (iv && (iv.chromatic || iv.diatonic)) k += 7 * iv.chromatic - 12 * iv.diatonic;
+        } catch (e) {}
+        return normalizeKey(k);
+    }
+
+    // A key in -7..7, preferring the spelling with at most 6 accidentals
+    function normalizeKey(k) {
+        while (k > 6) k -= 12;
+        while (k < -6) k += 12;
+        return k;
+    }
+
+    // Adds a key signature (concert fifths) to one staff at a bar start.
+    // Setting the mode or transposing a key signature that isn't on a staff yet
+    // crashes MuseScore: it is added first, then set again (so a transposing
+    // instrument gets its written key).
+    function addKeySig(staffIdx, tick, fifths, mode) {
+        var ks = newElement(Element.KEYSIG);
+        ks.concertKey = fifths;
+        var c = makeCursor({ tick: tick, staff: staffIdx, voice: 0 });
+        requireSegment(c, { tick: tick, staff: staffIdx });
+        c.add(ks);
+        ks.concertKey = fifths;
+        if (mode === "minor") ks.keysig_mode = KeyMode.MINOR;
+        else if (mode === "major") ks.keysig_mode = KeyMode.MAJOR;
+    }
+
+    // Chord symbol text moved by `shift` fifths: root and bass ("F#m7b5/A" +2
+    // semitones -> "G#m7b5/B"). Roots are spelled Gb..A# (never Fb, Cb, E#, B#).
+    // null if the text doesn't start with a note name.
+    function transposeChordText(text, shift) {
+        var letters = { F: 13, C: 14, G: 15, D: 16, A: 17, E: 18, B: 19 };
+        function move(letter, acc) {
+            var alter = { "": 0, "#": 1, "##": 2, "b": -1, "bb": -2, "\u266f": 1, "\u266d": -1 }[acc || ""];
+            var tpc = letters[letter] + 7 * alter + shift;
+            while (tpc > 24) tpc -= 12;
+            while (tpc < 8) tpc += 12;
+            return getTpcName(tpc);
+        }
+        var m = /^([A-G])(##|#|bb|b|\u266f|\u266d)?(.*)$/.exec(String(text));
+        if (!m) return null;
+        var rest = m[3];
+        var bass = /\/([A-G])(##|#|bb|b|\u266f|\u266d)?$/.exec(rest);
+        if (bass) rest = rest.substring(0, rest.length - bass[0].length) + "/" + move(bass[1], bass[2]);
+        return move(m[1], m[2]) + rest;
+    }
+
+    // [{ann, tick}] of the given annotation types on the staves in [startTick, endTick)
+    function annotationsWithTicks(startTick, endTick, staves, types) {
+        var out = [];
+        var m = curScore.tick2measure(fractionFromTicks(startTick));
+        while (m && m.tick.ticks < endTick) {
+            var seg = m.firstSegment;
+            while (seg) {
+                if (seg.tick >= startTick && seg.tick < endTick) {
+                    var anns = seg.annotations;
+                    for (var a = 0; a < anns.length; a++) {
+                        var ann = anns[a];
+                        if (types.indexOf(ann.type) >= 0 && ann.track >= 0 && staves.indexOf(Math.floor(ann.track / 4)) >= 0) {
+                            out.push({ ann: ann, tick: seg.tick });
+                        }
+                    }
+                }
+                seg = seg.nextInMeasure;
+            }
+            m = m.nextMeasure;
+        }
+        return out;
+    }
+
     // Transposes every note in the range (on the given staves and voices) by
     // `semitones`. Notes tied into or out of the range move with it.
     // Key signatures and chord symbols are left as they are.
@@ -2338,6 +2432,16 @@ MuseScore {
         var range = tickRange(params);
         var staves = staffList(params);
         var voices = voiceList(params);
+        var chords = boolParam(params, "chordSymbols", true);
+        var keys = boolParam(params, "keySignatures", false);
+        var shift = tpcShiftBySemitone[((semis % 12) + 12) % 12];
+        if (keys) {
+            var startBar = measureAtTick(range.startTick);
+            var endBar = measureAtTick(Math.max(range.startTick, range.endTick - 1));
+            if (startBar.startTick !== range.startTick || (range.endTick !== endBar.endTick)) {
+                return { error: "keySignatures needs whole bars (startMeasure/endMeasure): key signatures sit at barlines" };
+            }
+        }
 
         return mutate(function() {
             var notes = [];
@@ -2393,9 +2497,54 @@ MuseScore {
             touch(minTick, maxTick);
             var warnings = [];
             if (extendedTo.length) warnings.push("Tied notes outside the range moved too (ticks " + extendedTo.sort(function(a, b) { return a - b; }).join(", ") + ")");
-            var symbols = countAnnotations(range.startTick, range.endTick, staves, [Element.HARMONY]);
-            if (symbols) warnings.push(symbols + " chord symbol(s) in the range were not transposed");
-            var r = { message: "Transposed " + notes.length + " note(s) in " + range.label + " by " + semis + " semitone(s)", notes: notes.length };
+            var harmonies = annotationsWithTicks(range.startTick, range.endTick, staves, [Element.HARMONY]);
+            var movedChords = 0;
+            if (chords) {
+                for (i = 0; i < harmonies.length; i++) {
+                    var h = harmonies[i];
+                    var oldText = stripTags(h.ann.text);
+                    var newText = transposeChordText(oldText, shift);
+                    if (newText === null) {
+                        warnings.push("Chord symbol '" + oldText + "' at tick " + h.tick + " was not transposed (no root note found)");
+                        continue;
+                    }
+                    var hStaff = Math.floor(h.ann.track / 4);
+                    removeElement(h.ann);
+                    putText({ tick: h.tick, staff: hStaff, voice: 0 }, Element.HARMONY, newText);
+                    movedChords++;
+                }
+            } else if (harmonies.length) {
+                warnings.push(harmonies.length + " chord symbol(s) in the range were not transposed");
+            }
+            var keyChanges = 0;
+            if (keys) {
+                for (s = 0; s < staves.length; s++) {
+                    // the keys in effect before anything changes
+                    var bars = barsCovering(range.startTick, range.endTick);
+                    var plan = [];
+                    var prev = null;
+                    for (var b = 0; b < bars.length; b++) {
+                        var k = concertKeyAt(staves[s], bars[b].startTick);
+                        if (k !== prev) plan.push({ tick: bars[b].startTick, key: normalizeKey(k + shift) });
+                        prev = k;
+                    }
+                    var restore = range.endTick < scoreEndTick() ? concertKeyAt(staves[s], range.endTick) : null;
+                    for (var q = 0; q < plan.length; q++) {
+                        addKeySig(staves[s], plan[q].tick, plan[q].key);
+                        keyChanges++;
+                    }
+                    if (restore !== null && restore !== plan[plan.length - 1].key) {
+                        addKeySig(staves[s], range.endTick, restore);
+                        warnings.push("Staff " + staves[s] + ": the key before transposing (" + keyName(restore) + ") is restored at tick " + range.endTick);
+                    }
+                }
+                minTick = Math.min(minTick, range.startTick);
+                maxTick = Math.max(maxTick, range.endTick);
+                touch(minTick, maxTick);
+            }
+            var r = { message: "Transposed " + notes.length + " note(s) in " + range.label + " by " + semis + " semitone(s)" +
+                               (movedChords ? ", " + movedChords + " chord symbol(s)" : "") +
+                               (keys ? ", key signatures (" + keyChanges + ")" : ""), notes: notes.length };
             if (warnings.length) r.warnings = warnings;
             return r;
         });
@@ -2807,6 +2956,23 @@ MuseScore {
         return { success: true, kind: out.length ? "list" : "none", fromUser: selectionFromUser, elements: out, count: els.length };
     }
 
+    // Opens a score file (mscz, mscx, MusicXML, MIDI, ...) when no score is
+    // open. With a score open, MuseScore 4 would open the file in a new window
+    // (another MuseScore process), out of this plugin's reach, so that is refused.
+    function openScore(params) {
+        var validation = validateParams(params, ["path"]);
+        if (!validation.valid) return validation;
+        if (typeof params.path !== "string" || !params.path.length) return { error: "path must be a file path" };
+        if (curScore) {
+            return { error: "A score is already open. MuseScore 4 opens another file in a new window, which this plugin can't reach. " +
+                            "Close the score in MuseScore (File > Close) and ask again, or open the file in MuseScore yourself." };
+        }
+        var opened = readScore(params.path, false);
+        if (!opened || !curScore) return { error: "MuseScore could not open " + params.path + " (does the file exist?)" };
+        cursorState = { tick: 0, staff: 0, voice: 0, lastChord: null };
+        return { success: true, message: "Opened " + params.path, title: curScore.title, numMeasures: listMeasures().length };
+    }
+
     // Bars whose voices don't add up (MuseScore marks them corrupted).
     function checkScore(params) {
         if (!curScore) return { error: "No score open" };
@@ -3129,20 +3295,11 @@ MuseScore {
         return mutate(function() {
             var t = resolveTarget(params);
             var m = measureAtTick(Math.min(t.tick, scoreEndTick() - 1));
-            for (var s = staves.first; s <= staves.last; s++) {
-                // Setting the mode (or transposing) on a key signature that is
-                // not yet on a staff crashes MuseScore: add it first.
-                var ks = newElement(Element.KEYSIG);
-                ks.concertKey = params.fifths;
-                var c = makeCursor({ tick: m.startTick, staff: s, voice: 0 });
-                requireSegment(c, { tick: m.startTick, staff: s });
-                c.add(ks);
-                ks.concertKey = params.fifths;   // now with the staff: transposing instruments get their written key
-                if (params.mode === "minor") ks.keysig_mode = KeyMode.MINOR;
-                else if (params.mode === "major") ks.keysig_mode = KeyMode.MAJOR;
-            }
-            var got = staffObj(staves.first).key(fractionFromTicks(m.startTick));
-            if (got !== params.fifths) throw new Error("MuseScore did not apply the key signature (staff reads " + got + ")");
+            for (var s = staves.first; s <= staves.last; s++) addKeySig(s, m.startTick, params.fifths, params.mode);
+            // Staff.key() is the written key: compare the concert key
+            var got = concertKeyAt(staves.first, m.startTick);
+            if (got !== normalizeKey(params.fifths)) throw new Error("MuseScore did not apply the key signature (staff reads " + got + ")");
+            touch(m.startTick, m.startTick);
             return { message: "Key signature " + keyName(params.fifths) + " from bar " + m.number };
         });
     }
@@ -3580,10 +3737,18 @@ MuseScore {
         if (!validation.valid) return validation;
         if (!curScore) return { error: "No score open" };
 
+        var count = curScore.parts.length;
+        var position = isSet(params.position) ? checkInt(params.position, "position", 0, count) : count;
         return mutate(function() {
-            curScore.appendPart(params.instrumentId);
+            if (position === count) {
+                curScore.appendPart(params.instrumentId);
+            } else {
+                // insertPart doesn't fall back to a default instrument for an unknown id
+                curScore.insertPart(params.instrumentId, position);
+                if (curScore.parts.length !== count + 1) throw new Error("Unknown instrument id '" + params.instrumentId + "' (see list_instruments)");
+            }
             var parts = curScore.parts;
-            var added = partSummary(parts[parts.length - 1], parts.length - 1);
+            var added = partSummary(parts[position], position);
             var result = { message: "Instrument " + added.name + " added on staff " + added.staves.join(", "), part: added };
             if (added.instrumentId !== params.instrumentId) {
                 result.warning = "Instrument id '" + params.instrumentId + "' was not found; MuseScore used '" + added.instrumentId + "' instead";
@@ -3624,6 +3789,27 @@ MuseScore {
             }
             cursorState.lastChord = null;
             return { message: "Removed instrument " + removed.name + " (was staff " + removed.staves.join(", ") + ")", removed: removed };
+        });
+    }
+
+    // Renames an instrument (part): the name shown before the first system and
+    // its short name on the following systems.
+    function setInstrumentName(params) {
+        if (!curScore) return { error: "No score open" };
+        if (!isSet(params.name) && !isSet(params.shortName)) return { error: "Give name and/or shortName" };
+        var part;
+        if (isSet(params.part)) {
+            part = curScore.parts[checkInt(params.part, "part", 0, curScore.parts.length - 1)];
+        } else {
+            part = staffObj(checkInt(isSet(params.staff) ? params.staff : cursorState.staff, "staff", 0, curScore.nstaves - 1)).part;
+        }
+        return mutate(function() {
+            var tick0 = fractionFromTicks(0);
+            if (isSet(params.name)) curScore.setInstrumentName(part, tick0, String(params.name));
+            if (isSet(params.shortName)) curScore.setInstrumentAbbreviature(part, tick0, String(params.shortName));
+            touch(0, 0);
+            return { message: "Instrument " + partIndexOf(part) + " is now named " + (part.longName || params.name) +
+                              (isSet(params.shortName) ? " (" + params.shortName + ")" : "") };
         });
     }
 

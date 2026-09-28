@@ -15,7 +15,8 @@ Ties       "~" after a note or chord ties it to the next one (C4:h~ C4:q);
            inside a chord only the marked pitches are tied ([C4~ E4]:h).
 Tuplets    {3:2 C4:e D4 E4} = three eighths in the time of two.
 Markings   in parentheses right after a note/rest: a dynamic (mf), articulations
-           (staccato, accent, tenuto, marcato, ...), fermata, a lyric syllable
+           (staccato, accent, tenuto, marcato, ...), ornaments (trill, mordent,
+           short-trill, turn, inverted-turn), bowings (up-bow, down-bow), fermata, a lyric syllable
            ("Hel-" continues the word on the next note, "_" leaves a note
            without one), text="dolce", chord=Cmaj7 (chord symbol).
 Bar lines  "|" is optional; when given, the bars between two "|" must all have
@@ -152,9 +153,16 @@ ARTICULATIONS = {
     "accent": "articAccent", "marcato": "articMarcato", "portato": "articTenutoStaccato",
     "accent-staccato": "articAccentStaccato", "marcato-staccato": "articMarcatoStaccato",
     "stress": "articStress", "unstress": "articUnstress",
+    "up-bow": "stringsUpBow", "down-bow": "stringsDownBow", "harmonic": "stringsHarmonic",
+    "snap-pizzicato": "pluckedSnapPizzicato", "open": "brassMuteOpen", "stopped": "brassMuteClosed",
+    # ornaments
+    "trill": "ornamentTrill", "mordent": "ornamentMordent", "short-trill": "ornamentShortTrill",
+    "turn": "ornamentTurn", "inverted-turn": "ornamentTurnInverted",
 }
 ARTICULATION_ALIASES = {"stacc": "staccato", "stac": "staccato", "ten": "tenuto", "acc": "accent", "marc": "marcato",
-                        "staccatiss": "staccatissimo", ">": "accent", "^": "marcato", "-": "tenuto", ".": "staccato"}
+                        "staccatiss": "staccatissimo", ">": "accent", "^": "marcato", "-": "tenuto", ".": "staccato",
+                        "tr": "trill", "upbow": "up-bow", "downbow": "down-bow", "prall": "short-trill",
+                        "inverted-mordent": "short-trill", "snap-pizz": "snap-pizzicato"}
 _SYMBOL_TO_NAME = {sym: name for name, sym in ARTICULATIONS.items()}
 
 

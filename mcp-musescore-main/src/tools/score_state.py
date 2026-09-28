@@ -134,6 +134,18 @@ def setup_score_state_tools(mcp, client: MuseScoreClient):
         return sel
 
     @mcp.tool()
+    async def open_score(path: str):
+        """Open a score file in MuseScore: .mscz/.mscx, MusicXML (.musicxml/.xml/.mxl), MIDI (.mid),
+        and the other formats MuseScore imports. Only works while no score is open in the MuseScore
+        window the plugin runs in (MuseScore 4 opens a second file in a new window, which the plugin
+        can't reach); otherwise ask the user to open the file, or to close the current score first.
+        Importing may show MuseScore's import dialog, which the user has to confirm.
+
+        Args:
+            path: The file, on the computer running MuseScore (e.g. "C:/Users/me/Music/song.mscz")."""
+        return await client.send_command("openScore", {"path": path})
+
+    @mcp.tool()
     async def check_score():
         """Check the score for corrupted bars (voices whose durations don't add up to the bar), which
         MuseScore warns about on saving. Returns the bar and staff of each."""

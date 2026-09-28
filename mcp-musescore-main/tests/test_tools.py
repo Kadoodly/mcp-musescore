@@ -73,10 +73,10 @@ def required_args(tool):
 def test_tool_count_and_every_tool_documented(server):
     app, _ = server
     names = [t.name for t in tools(app)]
-    assert len(names) == 69
+    assert len(names) == 71
     assert "write_voice" in names
     doc = TOOLS_MD.read_text()
-    assert "currently registers 69 public tools" in doc
+    assert "currently registers 71 public tools" in doc
     missing = [n for n in names if f"`{n}`" not in doc]
     assert not missing, f"tools.md doesn't mention {missing}"
 

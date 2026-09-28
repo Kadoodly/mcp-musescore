@@ -671,6 +671,9 @@ test('event markings: dynamic, articulations, fermata, lyric, text, chord symbol
     // writing a dynamic again replaces it
     ok(ms.call('writeVoice', { measure: 1, events: [{ pitches: [60], duration: '1/4', dynamic: 'pp' }] }));
     assert.deepStrictEqual(ms.annotationsAt(0).filter(a => a.type === Element.DYNAMIC).map(a => a.dynamicType), [DynamicType.PP]);
+    ok(ms.call('writeVoice', { measure: 2, events: [{ pitches: [60], duration: '1/4', articulations: ['trill', 'up-bow', 'short-trill'] }] }));
+    assert.deepStrictEqual(ms.crAt(0, WHOLE).arts.map(a => [a.type, a.symbol]),
+                           [[Element.ORNAMENT, 'ornamentTrill'], [Element.ARTICULATION, 'stringsUpBow'], [Element.ORNAMENT, 'ornamentShortTrill']]);
     fails(ms.call('writeVoice', { measure: 2, events: [{ pitches: [60], duration: '1/4', dynamic: 'loud' }] }), /unknown dynamic 'loud'/);
     fails(ms.call('writeVoice', { measure: 2, events: [{ rest: true, duration: '1/4', articulations: ['staccato'] }] }), /a rest can only have a fermata/);
     fails(ms.call('writeVoice', { measure: 2, events: [{ pitches: [60], duration: '1/4', articulations: ['wobble'] }] }), /unknown articulation 'wobble'/);
@@ -722,7 +725,31 @@ test('transpose: pitches and spelling; tied notes outside the range follow', () 
     assert.strictEqual(ms.snapshot(), before);
     ok(ms.call('addChordSymbol', { text: 'C', measure: 4 }));
     ok(ms.call('writeVoice', { measure: 4, events: [notes([60], '1/1')] }));
-    assert.match(ok(ms.call('transpose', { semitones: 2, startMeasure: 4 })).warnings.join(), /1 chord symbol\(s\) in the range were not transposed/);
+    assert.match(ok(ms.call('transpose', { semitones: 2, startMeasure: 4, chordSymbols: false })).warnings.join(),
+                 /1 chord symbol\(s\) in the range were not transposed/);
+});
+
+test('transpose: chord symbols and key signatures move too', () => {
+    const ms = fresh({ bars: 6 });
+    ok(ms.call('writeVoice', { measure: 2, events: [{ pitches: ['F#4'], duration: '1/2', chord: 'F#m7b5/A' }, { pitches: ['B4'], duration: '1/2', chord: 'B7' }] }));
+    ok(ms.call('addChordSymbol', { text: 'Ebmaj7', measure: 3 }));
+    ok(ms.call('addChordSymbol', { text: 'N.C.', measure: 3, offset: '1/2' }));
+    ok(ms.call('setKeySignature', { fifths: 2, measure: 2 }));
+    const r = ok(ms.call('transpose', { semitones: 2, startMeasure: 2, endMeasure: 3, keySignatures: true }));
+    const chords = t => ms.annotationsAt(t).filter(a => a.type === Element.HARMONY).map(a => a.text);
+    assert.deepStrictEqual([chords(WHOLE), chords(WHOLE + 960), chords(2 * WHOLE), chords(2 * WHOLE + 960)],
+                           [['G#m7b5/B'], ['C#7'], ['Fmaj7'], ['N.C.']]);
+    assert.match(r.warnings.join(), /Chord symbol 'N.C.' .* was not transposed/);
+    // D major -> E major in bars 2-3 on both staves; bar 4 goes back to D major
+    assert.deepStrictEqual(ms.state.keys[0], [{ tick: 0, fifths: 0 }, { tick: WHOLE, fifths: 4 }, { tick: 3 * WHOLE, fifths: 2 }]);
+    assert.deepStrictEqual(ms.state.keys[1], ms.state.keys[0]);
+    // a whole-step down from C major (with a key change inside) over the whole score
+    const ms2 = fresh({ bars: 4 });
+    ok(ms2.call('setKeySignature', { fifths: -1, measure: 3 }));
+    ok(ms2.call('transpose', { semitones: -2, startMeasure: 1, endMeasure: 4, keySignatures: true, staves: [0] }));
+    assert.deepStrictEqual(ms2.state.keys[0], [{ tick: 0, fifths: -2 }, { tick: 2 * WHOLE, fifths: -3 }]);
+    assert.deepStrictEqual(ms2.state.keys[1], [{ tick: 0, fifths: 0 }, { tick: 2 * WHOLE, fifths: -1 }]);
+    fails(ms2.call('transpose', { semitones: 2, startTick: 0, endTick: 960, keySignatures: true }), /keySignatures needs whole bars/);
 });
 
 test('clearRange: notes, voices, markings; held notes are cut, not re-struck', () => {
@@ -897,6 +924,21 @@ test('exportScore and saveScore', () => {
     ok(ms.call('saveScore'));
     assert.ok(ms.log.includes('file-save'));
     assert.strictEqual(ok(ms.call('getVersion')).version, v);        // not an edit
+});
+
+test('setInstrumentName renames a part', () => {
+    const ms = fresh();
+    ok(ms.call('setInstrumentName', { staff: 0, name: 'Violin I', shortName: 'Vln. I' }));
+    const hdr = ok(ms.call('getScore', { startMeasure: 1, endMeasure: 1 })).analysis;
+    assert.deepStrictEqual([hdr.staves[0].instrument, hdr.staves[0].shortName], ['Violin I', 'Vln. I']);
+    fails(ms.call('setInstrumentName', { staff: 0 }), /Give name and\/or shortName/);
+    fails(ms.call('addInstrument', { instrumentId: 'flute', position: 5 }), /position must be an integer 0-1/);
+});
+
+test('openScore refuses while a score is open (MuseScore would open another window)', () => {
+    const ms = fresh();
+    fails(ms.call('openScore', { path: '/x/song.mscz' }), /A score is already open/);
+    assert.ok(!ms.log.some(l => l.startsWith('readScore')));
 });
 
 test('redo after undo restores the edit and the cursor', () => {

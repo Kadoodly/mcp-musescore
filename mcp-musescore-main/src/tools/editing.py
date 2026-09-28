@@ -82,15 +82,6 @@ def setup_editing_tools(mcp, client: MuseScoreClient):
             params["endMeasure"] = end_measure
         return await client.send_command("replaceSection", with_version(params, expected_version))
 
-    async def _transpose(semitones, start_measure, end_measure, start_tick, end_tick, staves, voices, expected_version):
-        params: Dict[str, Any] = {"semitones": semitones}
-        params.update(range_params(start_measure, end_measure, start_tick, end_tick))
-        if staves is not None:
-            params["staves"] = staves
-        if voices is not None:
-            params["voices"] = voices
-        return await client.send_command("transpose", with_version(params, expected_version))
-
     @mcp.tool()
     @append_doc(RANGE_DOC, VERSION_ARG)
     async def transpose(
@@ -101,17 +92,32 @@ def setup_editing_tools(mcp, client: MuseScoreClient):
         end_tick: Optional[int] = None,
         staves: Optional[List[int]] = None,
         voices: Optional[List[int]] = None,
+        chord_symbols: bool = True,
+        key_signatures: bool = False,
         expected_version: Optional[int] = None,
     ):
-        """Transpose the notes in a range chromatically by a number of semitones (one undo step),
-        respelling them (D major up 2 = E major). Notes tied into or out of the range move with it.
-        Key signatures and chord symbols are not changed (the result warns about chord symbols).
+        """Transpose a range chromatically by a number of semitones (one undo step), respelling the
+        notes (D major up 2 = E major). Notes tied into or out of the range move with it; chord symbols
+        move too. To change the key of a piece or section, set key_signatures=true (whole bars): the key
+        signatures in the range move as well, and the old key comes back after the range.
 
         Args:
-            semitones: -48..48, e.g. 12 = an octave up, -3 = a minor third down.
+            semitones: -48..48, e.g. 12 = an octave up, -3 = a minor third down, 5 = a fourth up.
             staves: Staff indices (default: all staves).
-            voices: Voices 0-3 (default: all)."""
-        return await _transpose(semitones, start_measure, end_measure, start_tick, end_tick, staves, voices, expected_version)
+            voices: Voices 0-3 (default: all).
+            chord_symbols: Transpose the chord symbols in the range (default true).
+            key_signatures: Also transpose the key signatures (default false: for moving a phrase)."""
+        params: Dict[str, Any] = {"semitones": semitones}
+        params.update(range_params(start_measure, end_measure, start_tick, end_tick))
+        if staves is not None:
+            params["staves"] = staves
+        if voices is not None:
+            params["voices"] = voices
+        if not chord_symbols:
+            params["chordSymbols"] = False
+        if key_signatures:
+            params["keySignatures"] = True
+        return await client.send_command("transpose", with_version(params, expected_version))
 
     @mcp.tool()
     @append_doc(RANGE_DOC, VERSION_ARG)

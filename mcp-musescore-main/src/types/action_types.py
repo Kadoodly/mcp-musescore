@@ -164,6 +164,15 @@ class setTempoParams(TypedDict):
 @with_config(STRICT)
 class addInstrumentParams(TypedDict):
     instrumentId: str
+    position: NotRequired[int]
+
+
+@with_config(STRICT)
+class setInstrumentNameParams(TypedDict):
+    staff: NotRequired[int]
+    part: NotRequired[int]
+    name: NotRequired[str]
+    shortName: NotRequired[str]
 
 
 @with_config(STRICT)
@@ -356,6 +365,8 @@ class transposeParams(tickOrBarRange):
     semitones: int
     staves: NotRequired[List[int]]
     voices: NotRequired[List[int]]
+    chordSymbols: NotRequired[bool]
+    keySignatures: NotRequired[bool]
 
 
 @with_config(STRICT)
@@ -458,6 +469,7 @@ SEQUENCE_ACTIONS = {
     "removeInstrument": (removeInstrumentParams, False),
     "setStaffMute": (setStaffMuteParams, True),
     "setInstrumentSound": (setInstrumentSoundParams, True),
+    "setInstrumentName": (setInstrumentNameParams, True),
     "undo": (stepsParams, False),
     "redo": (stepsParams, False),
     "addRepeat": (repeatParams, True),

@@ -27,7 +27,7 @@ const WHOLE = 1920;
 const VOICES = 4;
 
 const Element = {
-    INVALID: 0, NOTE: 20, REST: 21, CHORD: 93, TIE: 30, ARTICULATION: 31, BREATH: 42, DYNAMIC: 43, TEXT: 44,
+    INVALID: 0, NOTE: 20, REST: 21, CHORD: 93, TIE: 30, ARTICULATION: 31, ORNAMENT: 32, BREATH: 42, DYNAMIC: 43, TEXT: 44,
     STAFF_TEXT: 45, SYSTEM_TEXT: 46, EXPRESSION: 47, TRIPLET_FEEL: 48, REHEARSAL_MARK: 49, FERMATA: 51,
     HARMONY: 53, TEMPO_TEXT: 60, MARKER: 70, JUMP: 71, LYRICS: 72, KEYSIG: 73, TIMESIG: 74, CLEF: 75,
     LAYOUT_BREAK: 76, SEGMENT: 90, MEASURE: 91, VBOX: 92,
@@ -344,6 +344,7 @@ class MockMuseScore {
         const cr = this.crAt(track, tick);
         switch (el.type) {
             case Element.ARTICULATION:
+            case Element.ORNAMENT:
                 if (cr && !cr.rest) { el.id = this.id(); cr.arts.push(el); }
                 return;
             case Element.LYRICS:
@@ -702,6 +703,8 @@ class MockMuseScore {
                 if (!eng.state.frame) eng.state.frame = { elements: [] };
                 eng.state.frame.elements.push({ id: eng.id(), type: Element.TEXT, subStyle: TextStyleType[style], text });
             },
+            setInstrumentName(part, tick, name) { eng.requireOpen('setInstrumentName'); part.longName = name; part.partName = name; },
+            setInstrumentAbbreviature(part, tick, name) { eng.requireOpen('setInstrumentAbbreviature'); part.shortName = name; },
             addRemoveSystemLocks(interval, lock) {
                 eng.requireOpen('addRemoveSystemLocks');
                 if (eng.selection.kind !== 'range') return;          // works on the selected bars
@@ -918,6 +921,7 @@ class MockMuseScore {
             Tid, ClefType, LayoutBreak, SymId,
             newElement(type) { return type === Element.NOTE ? { __newNote: true, type, pitch: 60 } : { type }; },
             removeElement(el) { eng.removeElement(el); },
+            readScore(p) { eng.log.push('readScore ' + p); return null; },
             writeScore(s, p, ext) {
                 if (s !== score) return false;
                 if (/missing-folder/.test(p)) return false;

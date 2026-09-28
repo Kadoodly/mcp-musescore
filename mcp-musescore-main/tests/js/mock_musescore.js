@@ -1,16 +1,20 @@
 // A small model of the MuseScore 4.7 plugin API, enough to run the plugin's
-// note writing, tie, batch and validation code offline with node.
+// note writing, tie, batch, range, text and versioning code offline with node.
 //
 // It follows the engine behaviour the plugin relies on, as read in the
 // MuseScore v4.7.5 source (Cursor with its own input state, Score::setNoteRest /
 // makeGap / expandVoice, InputState::moveToNextInputPos, the plugin command
 // locking the undo stack, Score::cmdToggleTie falling back to cmdAddTie,
-// TDuration(Fraction) truncating). Where the plugin must never go it is
-// stricter than MuseScore and throws (a duration crossing a barline, a write
-// starting inside a held note, findSegmentAtTick past the end of the score).
+// TDuration(Fraction) truncating, Score::changeCRlen behind
+// ChordRest.duration =, Score::deleteItem turning a chord into a rest and a
+// rest of voices 2-4 into a gap, Cursor::add putting each element type in its
+// place, system locks working on the selection). Where the plugin must never
+// go it is stricter than MuseScore and throws (a duration crossing a barline,
+// a write starting inside a held note, findSegmentAtTick past the end of the
+// score, lengthening with ChordRest.duration, ...).
 //
-// This is NOT MuseScore. It tests the plugin's own logic; only the live test
-// (tests/live/test_step1.py) shows what MuseScore really does.
+// This is NOT MuseScore. It tests the plugin's own logic; only the live tests
+// (tests/live/) show what MuseScore really does.
 
 'use strict';
 
@@ -23,13 +27,29 @@ const WHOLE = 1920;
 const VOICES = 4;
 
 const Element = {
-    INVALID: 0, NOTE: 20, REST: 21, CHORD: 93, TIE: 30, DYNAMIC: 43, TEMPO_TEXT: 60, FERMATA: 51,
-    STAFF_TEXT: 45, SYSTEM_TEXT: 46, EXPRESSION: 47, HARMONY: 53, REHEARSAL_MARK: 49, BREATH: 42,
-    TRIPLET_FEEL: 48, SLUR: 100, HAIRPIN: 101, GRADUAL_TEMPO_CHANGE: 102, VOLTA: 103, OTTAVA: 104,
-    PEDAL: 105, TRILL: 106, TEXTLINE: 107, LET_RING: 108, MARKER: 70, JUMP: 71, LYRICS: 72,
-    KEYSIG: 73, TIMESIG: 74, SEGMENT: 90, MEASURE: 91,
+    INVALID: 0, NOTE: 20, REST: 21, CHORD: 93, TIE: 30, ARTICULATION: 31, BREATH: 42, DYNAMIC: 43, TEXT: 44,
+    STAFF_TEXT: 45, SYSTEM_TEXT: 46, EXPRESSION: 47, TRIPLET_FEEL: 48, REHEARSAL_MARK: 49, FERMATA: 51,
+    HARMONY: 53, TEMPO_TEXT: 60, MARKER: 70, JUMP: 71, LYRICS: 72, KEYSIG: 73, TIMESIG: 74, CLEF: 75,
+    LAYOUT_BREAK: 76, SEGMENT: 90, MEASURE: 91, VBOX: 92,
+    SLUR: 100, HAIRPIN: 101, GRADUAL_TEMPO_CHANGE: 102, VOLTA: 103, OTTAVA: 104, PEDAL: 105, TRILL: 106,
+    TEXTLINE: 107, LET_RING: 108,
 };
 const SegmentType = { ChordRest: 128, All: 0xffffff };
+// Tid as the plugin API has it: the lyricist style is POET
+const Tid = { DEFAULT: 0, TITLE: 1, SUBTITLE: 2, COMPOSER: 3, POET: 4, TRANSLATOR: 5 };
+// curScore.addText takes TextStyleType names
+const TextStyleType = { TITLE: Tid.TITLE, SUBTITLE: Tid.SUBTITLE, COMPOSER: Tid.COMPOSER, LYRICIST: Tid.POET };
+const ClefType = {
+    INVALID: -1, G: 0, G15_MB: 1, G8_VB: 2, G8_VA: 3, G15_MA: 4, G8_VB_O: 5, G8_VB_P: 6, G_1: 7, C1: 8, C2: 9, C3: 10,
+    C4: 11, C5: 12, F: 20, F15_MB: 21, F8_VB: 22, F_8VA: 23, F_15MA: 24, F_B: 25, F_C: 26, PERC: 29, PERC2: 30, TAB: 31,
+};
+const LayoutBreak = { PAGE: 0, LINE: 1, SECTION: 2, NOBREAK: 3 };
+const DynamicType = {};
+['OTHER', 'PPPPPP', 'PPPPP', 'PPPP', 'PPP', 'PP', 'P', 'MP', 'MF', 'F', 'FF', 'FFF', 'FFFF', 'FFFFF', 'FFFFFF', 'FP', 'PF',
+ 'SF', 'SFZ', 'SFF', 'SFFZ', 'SFFF', 'SFFFZ', 'SFP', 'SFPP', 'RFZ', 'RF', 'FZ', 'M', 'R', 'S', 'Z', 'N']
+    .forEach((k, i) => { DynamicType[k] = i; });
+// SymId.<name> is a number in MuseScore; here it is the name, so tests can read it back.
+const SymId = new Proxy({}, { get: (t, k) => (typeof k === 'string' ? k : undefined) });
 
 // Longest TDuration (up to 4 dots) that fits `ticks`, else a quarter:
 // what Cursor.setDuration() does with a duration that isn't one value.
@@ -56,19 +76,33 @@ function toDurationList(ticks) {
     return out;
 }
 
+// How MuseScore spells a pitch entered without a name (key of C)
+const DEFAULT_TPC = [14, 21, 16, 11, 18, 13, 20, 15, 22, 17, 12, 19];
+
 class MockMuseScore {
     constructor(opts = {}) {
         const nstaves = opts.nstaves || 2;
         const bars = opts.bars || 4;
         const ts = opts.timesig || [4, 4];
-        this.state = { nstaves, measures: [], crs: {}, ties: {}, nextId: 1 };
+        this.state = {
+            nstaves, measures: [], crs: {}, ties: {}, anns: [], keys: {}, clefs: {}, nextId: 1, locks: null,
+            frame: opts.noTitle ? null : { elements: [{ id: 0, type: Element.TEXT, subStyle: Tid.TITLE, text: 'Mock' }] },
+        };
         for (let t = 0; t < nstaves * VOICES; t++) this.state.crs[t] = [];
+        for (let s = 0; s < nstaves; s++) {
+            this.state.keys[s] = [{ tick: 0, fifths: opts.fifths || 0 }];
+            this.state.clefs[s] = [{ tick: 0, type: s === 1 ? ClefType.F : ClefType.G }];
+        }
         this.appendMeasures(bars, ts);
+        this.meta = { workTitle: opts.noTitle ? '' : 'Mock' };   // setMetaTag is not undoable in MuseScore
         this.undoStack = [];
+        this.redoStack = [];
         this.open = null;          // snapshot of the open command
         this.noteEntryMode = false;
         this.inputDuration = 480;  // the score's own input state (used by cmdAddTie)
         this.selection = { kind: 'none', els: [], range: null };
+        this.clipboard = null;
+        this.exports = [];
         this.log = [];             // cmd() calls
         this.counters = { selectRange: 0, selClear: 0, select: 0, firstMeasure: 0, startCmd: 0, endCmd: 0, tieCmd: 0 };
         this.replies = [];
@@ -82,6 +116,7 @@ class MockMuseScore {
     trackCrs(track) { return this.state.crs[track]; }
     crAt(track, tick) { return this.trackCrs(track).find(c => c.tick === tick) || null; }
     crCovering(track, tick) { return this.trackCrs(track).find(c => c.tick <= tick && tick < c.tick + c.actual) || null; }
+    crById(id) { for (const t in this.state.crs) { const c = this.state.crs[t].find(x => x.id === id); if (c) return c; } return null; }
     segmentTicks() {
         const set = new Set();
         for (const t in this.state.crs) for (const c of this.state.crs[t]) set.add(c.tick);
@@ -94,6 +129,16 @@ class MockMuseScore {
     }
     snapshot() { return JSON.stringify(this.state); }
     restore(s) { this.state = JSON.parse(s); }
+    staffOf(track) { return Math.floor(track / VOICES); }
+
+    newNote(pitch) {
+        const tpc = DEFAULT_TPC[pitch % 12];
+        return { id: this.id(), pitch, tpc1: tpc, tpc2: tpc, tieFor: null, tieBack: null };
+    }
+    newCr(track, tick, ticks, actual, pitch, tuplet) {
+        return { id: this.id(), track, tick, ticks, actual, rest: pitch === null, gap: false, tuplet: tuplet || null,
+                 notes: pitch === null ? [] : [this.newNote(pitch)], lyrics: [], arts: [] };
+    }
 
     appendMeasures(n, ts) {
         const ms = this.state.measures;
@@ -102,10 +147,8 @@ class MockMuseScore {
         for (let i = 0; i < n; i++) {
             const tick = this.endTick;
             const ticks = WHOLE * num / den;
-            ms.push({ id: this.id(), tick, ticks, num, den, repeatStart: false, repeatEnd: false });
-            for (let s = 0; s < this.state.nstaves; s++) {
-                this.insertCr({ id: this.id(), track: s * VOICES, tick, ticks, actual: ticks, rest: true, notes: [], tuplet: null });
-            }
+            ms.push({ id: this.id(), tick, ticks, num, den, repeatStart: false, repeatEnd: false, repeatCount: 2, elements: [] });
+            for (let s = 0; s < this.state.nstaves; s++) this.insertCr(this.newCr(s * VOICES, tick, ticks, ticks, null));
         }
     }
 
@@ -144,7 +187,7 @@ class MockMuseScore {
     addRests(track, from, to) {
         let pos = from;
         for (const v of toDurationList(to - from)) {
-            this.insertCr({ id: this.id(), track, tick: pos, ticks: v, actual: v, rest: true, notes: [], tuplet: null });
+            this.insertCr(this.newCr(track, pos, v, v, null));
             pos += v;
         }
     }
@@ -168,13 +211,10 @@ class MockMuseScore {
         this.expandVoice(tick, track);
         const cr = this.crAt(track, tick);
         const m = this.measureAt(tick);
-        let actual = ticks;
         if (cr.tuplet) {
             if (cr.ticks !== ticks) throw new Error('mock: only same-value writes inside tuplets are modelled');
-            actual = cr.actual;
             this.removeCr(cr);
-            this.insertCr({ id: this.id(), track, tick, ticks, actual, rest: pitch === null, tuplet: cr.tuplet,
-                            notes: pitch === null ? [] : [{ id: this.id(), pitch, tieFor: null, tieBack: null }] });
+            this.insertCr(this.newCr(track, tick, ticks, cr.actual, pitch, cr.tuplet));
             return;
         }
         if (tick + ticks > m.tick + m.ticks) {
@@ -190,9 +230,67 @@ class MockMuseScore {
             tail = Math.max(tail, v.tick + v.actual);
             this.removeCr(v);
         }
-        this.insertCr({ id: this.id(), track, tick, ticks, actual: ticks, rest: pitch === null, tuplet: null,
-                        notes: pitch === null ? [] : [{ id: this.id(), pitch, tieFor: null, tieBack: null }] });
+        this.insertCr(this.newCr(track, tick, ticks, ticks, pitch));
         if (tail > end) this.addRests(track, end, tail);
+    }
+
+    // Score::changeCRlen, behind ChordRest.duration = (shortening only).
+    changeCRlen(id, ticks) {
+        this.requireOpen('ChordRest.duration =');
+        const cr = this.crById(id);
+        if (!(ticks > 0 && ticks < cr.ticks)) throw new Error('mock: ChordRest.duration = ' + ticks + ' on a ' + cr.ticks + '-tick element: only shortening is modelled');
+        if (cr.tuplet) throw new Error('mock: shortening a note of a tuplet is not modelled');
+        if (NOTE_VALUES.indexOf(ticks) < 0) {
+            throw new Error('mock: ChordRest.duration = ' + ticks + ' ticks is not one note value (changeCRlen would put rests into the chord\'s own length)');
+        }
+        for (const n of cr.notes) if (n.tieFor) this.removeTie(n.tieFor);
+        const oldEnd = cr.tick + cr.actual;
+        cr.ticks = ticks;
+        cr.actual = ticks;
+        this.addRests(cr.track, cr.tick + ticks, oldEnd);    // setRest(): visible rests, even after a gap
+    }
+
+    // Score::deleteItem
+    deleteCr(cr) {
+        if (!cr.rest) {
+            this.removeCr(cr);
+            const rest = this.newCr(cr.track, cr.tick, cr.ticks, cr.actual, null, cr.tuplet);
+            this.insertCr(rest);
+            return;
+        }
+        if (cr.track % VOICES === 0 || cr.tuplet) return;     // voice 1 rests stay
+        cr.gap = true;
+        const m = this.measureAt(cr.tick);
+        const inBar = this.trackCrs(cr.track).filter(c => c.tick >= m.tick && c.tick < m.tick + m.ticks);
+        if (inBar.every(c => c.rest && c.gap)) inBar.forEach(c => this.removeCr(c));
+    }
+
+    removeElement(el) {
+        this.requireOpen('removeElement');
+        if (!el) return;
+        const id = el.__id !== undefined ? el.__id : el.id;
+        const cr = this.crById(id);
+        if (cr) return this.deleteCr(cr);
+        const found = this.findNote(id);
+        if (found) {
+            if (found.cr.notes.length > 1) {
+                if (found.note.tieFor) this.removeTie(found.note.tieFor);
+                if (found.note.tieBack) this.removeTie(found.note.tieBack);
+                found.cr.notes.splice(found.cr.notes.indexOf(found.note), 1);
+            } else {
+                this.deleteCr(found.cr);
+            }
+            return;
+        }
+        const lists = [this.state.anns];
+        for (const t in this.state.crs) for (const c of this.state.crs[t]) lists.push(c.lyrics, c.arts);
+        for (const m of this.state.measures) lists.push(m.elements);
+        if (this.state.frame) lists.push(this.state.frame.elements);
+        for (const list of lists) {
+            const i = list.findIndex(x => x.id === id);
+            if (i >= 0) { list.splice(i, 1); return; }
+        }
+        throw new Error('mock: removeElement of an element that is not in the score (' + JSON.stringify(el) + ')');
     }
 
     // InputState::nextInputPos
@@ -212,7 +310,7 @@ class MockMuseScore {
         if (next === undefined) return null;
         const a = this.measureAt(cr.tick), b = this.measureAt(next);
         if (a !== b && (b.repeatStart || a.repeatEnd)) return null;   // segmentsAreAdjacent
-        const staff = Math.floor(cr.track / VOICES);
+        const staff = this.staffOf(cr.track);
         let found = null;
         for (let t = staff * VOICES; t < staff * VOICES + VOICES; t++) {
             const c = this.crAt(t, next);
@@ -238,18 +336,96 @@ class MockMuseScore {
         this.addTie(noteId, this.crAt(cr.track, at).notes[0].id);
     }
 
+    // Cursor::add: each element type goes where MuseScore puts it.
+    cursorAdd(tick, track, el) {
+        this.requireOpen('Cursor.add');
+        if (el.id !== undefined) throw new Error('mock: Cursor.add of an element that is already in the score');
+        const staff = this.staffOf(track);
+        const cr = this.crAt(track, tick);
+        switch (el.type) {
+            case Element.ARTICULATION:
+                if (cr && !cr.rest) { el.id = this.id(); cr.arts.push(el); }
+                return;
+            case Element.LYRICS:
+                if (cr) { el.id = this.id(); el.verse = el.verse || 0; cr.lyrics.push(el); }
+                return;
+            case Element.CLEF: {
+                el.id = this.id();
+                const type = el.concertClefType !== undefined ? el.concertClefType : ClefType.G;
+                const list = this.state.clefs[staff].filter(c => c.tick !== tick);
+                list.push({ tick, type });
+                this.state.clefs[staff] = list.sort((a, b) => a.tick - b.tick);
+                return;
+            }
+            case Element.KEYSIG: {
+                el.id = this.id();
+                const at = this.measureAt(tick).tick;
+                const list = this.state.keys[staff].filter(k => k.tick !== at);
+                list.push({ tick: at, fifths: el.concertKey || 0 });
+                this.state.keys[staff] = list.sort((a, b) => a.tick - b.tick);
+                return;
+            }
+            case Element.TIMESIG:
+                throw new Error('mock: time signature changes are not modelled');
+            case Element.LAYOUT_BREAK:
+            case Element.MARKER:
+            case Element.JUMP:
+                el.id = this.id();
+                this.measureAt(tick).elements.push(el);
+                return;
+            default:
+                el.id = this.id();
+                el.tick = tick;
+                el.track = track;
+                this.state.anns.push(el);
+        }
+    }
+
+    annotationsAt(tick) { return this.state.anns.filter(a => a.tick === tick); }
+
+    // Quarter notes per second at `tick`, from the tempo marks (default 120 BPM)
+    tempoAt(tick) {
+        let tempo = 2, at = -1;
+        for (const a of this.state.anns) {
+            if (a.type === Element.TEMPO_TEXT && a.tick <= tick && a.tick >= at) { tempo = a.tempo; at = a.tick; }
+        }
+        return tempo;
+    }
+
+    corrupted(mi, staff) {
+        const m = this.state.measures[mi];
+        let pos = m.tick;
+        for (const c of this.trackCrs(staff * VOICES).filter(x => x.tick >= m.tick && x.tick < m.tick + m.ticks)) {
+            if (c.tick !== pos) return true;
+            pos += c.actual;
+        }
+        return pos !== m.tick + m.ticks;
+    }
+
     // What a track holds, for assertions: [{tick, ticks, actual, rest, pitches, tiedForward, tiedBack}]
     dump(track, from = 0, to = Infinity) {
-        return this.trackCrs(track).filter(c => c.tick >= from && c.tick < to).map(c => ({
-            tick: c.tick, ticks: c.ticks, actual: c.actual, rest: c.rest, tuplet: !!c.tuplet,
-            pitches: c.notes.map(n => n.pitch).sort((a, b) => a - b),
-            tiedForward: c.notes.filter(n => n.tieFor).map(n => n.pitch).sort((a, b) => a - b),
-            tiedBack: c.notes.filter(n => n.tieBack).map(n => n.pitch).sort((a, b) => a - b),
-            tieTargets: c.notes.filter(n => n.tieFor).map(n => {
-                const end = this.findNote(this.state.ties[n.tieFor].end);
-                return { pitch: n.pitch, tick: end.cr.tick, track: end.cr.track, pitch2: end.note.pitch };
-            }),
-        }));
+        return this.trackCrs(track).filter(c => c.tick >= from && c.tick < to).map(c => {
+            const d = {
+                tick: c.tick, ticks: c.ticks, actual: c.actual, rest: c.rest, tuplet: !!c.tuplet,
+                pitches: c.notes.map(n => n.pitch).sort((a, b) => a - b),
+                tiedForward: c.notes.filter(n => n.tieFor).map(n => n.pitch).sort((a, b) => a - b),
+                tiedBack: c.notes.filter(n => n.tieBack).map(n => n.pitch).sort((a, b) => a - b),
+                tieTargets: c.notes.filter(n => n.tieFor).map(n => {
+                    const end = this.findNote(this.state.ties[n.tieFor].end);
+                    return { pitch: n.pitch, tick: end.cr.tick, track: end.cr.track, pitch2: end.note.pitch };
+                }),
+            };
+            if (c.gap) d.gap = true;
+            return d;
+        });
+    }
+
+    // Compact view of a track: "C4:480 r:480 ..." (pitch numbers, ~ for a tie)
+    brief(track, from = 0, to = Infinity) {
+        return this.trackCrs(track).filter(c => c.tick >= from && c.tick < to).map(c => {
+            if (c.rest) return (c.gap ? 'g' : 'r') + ':' + c.actual;
+            return c.notes.map(n => n.pitch + (n.tieFor ? '~' : '')).sort().join('.') + ':' + c.actual + (c.tuplet ? 't' : '');
+        }).join(' ');
     }
 
     // ---------------- API wrappers ----------------
@@ -259,10 +435,16 @@ class MockMuseScore {
         const eng = this;
         const found = eng.findNote(noteId);
         if (!found) return null;
+        const live = () => eng.findNote(noteId).note;
         return {
             __id: noteId, type: Element.NOTE, name: 'Note',
-            get pitch() { return eng.findNote(noteId).note.pitch; },
-            get tpc() { return 14; },
+            get pitch() { return live().pitch; },
+            set pitch(v) { eng.requireOpen('Note.pitch ='); live().pitch = v; },
+            get tpc() { return live().tpc1; },
+            get tpc1() { return live().tpc1; },
+            set tpc1(v) { eng.requireOpen('Note.tpc1 ='); live().tpc1 = v; },
+            get tpc2() { return live().tpc2; },
+            set tpc2(v) { eng.requireOpen('Note.tpc2 ='); live().tpc2 = v; },
             get track() { return eng.findNote(noteId).cr.track; },
             get fraction() { return eng.frac(eng.findNote(noteId).cr.tick); },
             get tieForward() { const n = eng.findNote(noteId); return n && n.note.tieFor ? eng.wrapTie(n.note.tieFor) : null; },
@@ -285,23 +467,28 @@ class MockMuseScore {
         if (!cr) return null;
         const eng = this;
         const id = cr.id;
-        const live = () => { for (const t in eng.state.crs) { const c = eng.state.crs[t].find(x => x.id === id); if (c) return c; } return null; };
+        const live = () => eng.crById(id);
         return {
             __id: id,
             get type() { return live().rest ? Element.REST : Element.CHORD; },
             get name() { return live().rest ? 'Rest' : 'Chord'; },
+            get gap() { const c = live(); return c.rest ? !!c.gap : undefined; },
             get track() { return live().track; },
             get fraction() { return eng.frac(live().tick); },
             get duration() { return eng.frac(live().ticks); },
+            set duration(f) { eng.changeCRlen(id, f.ticks); },
             get actualDuration() { return eng.frac(live().actual); },
             get tuplet() { const c = live(); return c.tuplet ? { actualNotes: c.tuplet.actual, normalNotes: c.tuplet.normal } : null; },
             get notes() { return live().notes.map(n => eng.wrapNote(n.id)); },
-            get lyrics() { return []; },
-            get articulations() { return []; },
+            get lyrics() { return live().lyrics.map(l => Object.assign({}, l)); },
+            get articulations() {
+                return live().arts.map(a => Object.assign({ subtypeName() { return a.symbol; } }, a));
+            },
             get graceNotes() { return []; },
             add(el) {
+                eng.requireOpen('Chord.add');
                 const c = live();
-                if (el.__newNote && !c.rest) c.notes.push({ id: eng.id(), pitch: el.pitch, tieFor: null, tieBack: null });
+                if (el.__newNote && !c.rest) c.notes.push(eng.newNote(el.pitch));
             },
             is(other) { return !!other && other.__id === id; },
         };
@@ -311,7 +498,8 @@ class MockMuseScore {
         if (tick === null || tick === undefined || !this.hasSegment(tick)) return null;
         const eng = this;
         return {
-            tick, type: Element.SEGMENT, annotations: [],
+            tick, type: Element.SEGMENT,
+            get annotations() { return eng.annotationsAt(tick); },
             elementAt(track) { return eng.wrapCr(eng.crAt(track, tick)); },
             get next() { const t = eng.segmentTicks().find(x => x > tick); return t === undefined ? null : eng.wrapSegment(t); },
             get nextInMeasure() {
@@ -321,20 +509,33 @@ class MockMuseScore {
         };
     }
 
+    wrapFrame() {
+        const eng = this;
+        if (!eng.state.frame) return null;
+        return { type: Element.VBOX, get elements() { return eng.state.frame.elements; }, prev: null };
+    }
+
     wrapMeasure(i) {
         const m = this.state.measures[i];
         if (!m) return null;
         const eng = this;
+        const live = () => eng.state.measures.find(x => x.id === m.id);
         return {
             type: Element.MEASURE,
             tick: eng.frac(m.tick), ticks: eng.frac(m.ticks),
             timesigActual: { numerator: m.num, denominator: m.den },
             timesigNominal: { numerator: m.num, denominator: m.den },
-            get repeatStart() { return m.repeatStart; },
-            get repeatEnd() { return m.repeatEnd; },
-            repeatCount: 2, elements: [],
+            get repeatStart() { return live().repeatStart; },
+            set repeatStart(v) { eng.requireOpen('Measure.repeatStart ='); live().repeatStart = v; },
+            get repeatEnd() { return live().repeatEnd; },
+            set repeatEnd(v) { eng.requireOpen('Measure.repeatEnd ='); live().repeatEnd = v; },
+            get repeatCount() { return live().repeatCount; },
+            set repeatCount(v) { eng.requireOpen('Measure.repeatCount ='); live().repeatCount = v; },
+            get elements() { return live().elements; },
+            corrupted(staff) { return eng.corrupted(eng.state.measures.indexOf(live()), staff); },
             get nextMeasure() { return eng.wrapMeasure(i + 1); },
             get prevMeasure() { return i > 0 ? eng.wrapMeasure(i - 1) : null; },
+            get prev() { return i > 0 ? eng.wrapMeasure(i - 1) : eng.wrapFrame(); },
             get firstSegment() { return eng.wrapSegment(m.tick); },
         };
     }
@@ -359,7 +560,7 @@ class MockMuseScore {
             get segment() { return eng.wrapSegment(st.seg); },
             get element() { return st.seg === null ? null : eng.wrapCr(eng.crAt(st.track, st.seg)); },
             get tick() { return st.seg === null ? 0 : st.seg; },
-            get tempo() { return 2; },
+            get tempo() { return eng.tempoAt(st.seg === null ? 0 : st.seg); },
             time() { return 0; },
             next() {
                 if (st.seg === null) return false;
@@ -382,7 +583,7 @@ class MockMuseScore {
                     if (st.last === null) throw new Error('mock: addNote(p, true) with a null last segment (crashes MuseScore)');
                     const cr = eng.crAt(st.track, st.last);
                     if (!cr || cr.rest) return;
-                    cr.notes.push({ id: eng.id(), pitch, tieFor: null, tieBack: null });
+                    cr.notes.push(eng.newNote(pitch));
                     const at = cr.tick;
                     const next = eng.nextInputPos(at, st.track);
                     st.last = at;
@@ -404,8 +605,11 @@ class MockMuseScore {
                 st.last = at;
                 if (next !== null) st.seg = next;
             },
+            // Cursor::addTuplet: changeCRlen(cr, duration), then the tuplet
+            // replaces that chord/rest.
             addTuplet(ratio, duration) {
                 eng.requireOpen('Cursor.addTuplet');
+                if (st.seg === null) return;
                 const at = st.seg;
                 const total = duration.ticks;
                 const base = total / ratio.denominator;
@@ -413,11 +617,21 @@ class MockMuseScore {
                 const m = eng.measureAt(at);
                 if (at + total > m.tick + m.ticks) return;
                 eng.expandVoice(at, st.track);
-                for (const v of eng.trackCrs(st.track).filter(c => c.tick < at + total && c.tick + c.actual > at)) eng.removeCr(v);
+                let tail = 0;
+                for (const v of eng.trackCrs(st.track).filter(c => c.tick >= at && c.tick < at + total)) {
+                    if (v.tuplet) throw new Error('mock: a tuplet over a tuplet is not modelled');
+                    tail = Math.max(tail, v.tick + v.actual);
+                    eng.removeCr(v);
+                }
+                if (tail > at + total) eng.addRests(st.track, at + total, tail);
                 const tup = { id: eng.id(), actual: ratio.numerator, normal: ratio.denominator };
                 for (let i = 0; i < ratio.numerator; i++) {
-                    eng.insertCr({ id: eng.id(), track: st.track, tick: at + i * actual, ticks: base, actual, rest: true, notes: [], tuplet: tup });
+                    eng.insertCr(eng.newCr(st.track, at + i * actual, base, actual, null, tup));
                 }
+            },
+            add(el) {
+                if (st.seg === null || !el) return;
+                eng.cursorAdd(st.seg, st.track, el);
             },
         };
     }
@@ -446,20 +660,44 @@ class MockMuseScore {
                 eng.selection = { kind: 'range', els: [], range: { start: st, end: et, s0, s1 } };
                 return true;
             },
-            clear() { eng.counters.selClear++; eng.selection = { kind: 'none', els: [], range: null }; return true; },
+            clear() {
+                eng.counters.selClear++;
+                if (process.env.TRACE) console.log('CLEAR', new Error().stack.split('\n').slice(2, 6).join(' | '));
+                eng.selection = { kind: 'none', els: [], range: null };
+                return true;
+            },
         };
         const staves = [];
         for (let s = 0; s < eng.state.nstaves; s++) {
-            staves.push({ part: { longName: 'Staff ' + s, partName: 'Staff ' + s, shortName: '', instrumentId: 'piano', startTrack: 0, endTrack: eng.state.nstaves * VOICES, show: true },
-                          key() { return 0; }, swing() { return { isOn: false }; } });
+            staves.push({
+                part: { longName: 'Staff ' + s, partName: 'Staff ' + s, shortName: '', instrumentId: 'piano', startTrack: 0, endTrack: eng.state.nstaves * VOICES, show: true },
+                key(f) { let k = 0; for (const e of eng.state.keys[s]) if (e.tick <= f.ticks) k = e.fifths; return k; },
+                swing() { return { isOn: false }; },
+                clefType(f) { let c = 0; for (const e of eng.state.clefs[s]) if (e.tick <= f.ticks) c = e.type; return c; },
+                transpose() { return { chromatic: 0, diatonic: 0 }; },
+            });
         }
-        return {
+        const api = {
+            is(other) { return other === api; },
             get nstaves() { return eng.state.nstaves; },
             get ntracks() { return eng.state.nstaves * VOICES; },
             staves,
             parts: [staves[0].part],
-            title: 'Mock', duration: 0, spanners: [],
-            metaTag() { return ''; },
+            title: 'Mock', duration: 0,
+            get spanners() { return []; },
+            metaTag(k) { return eng.meta[k] || ''; },
+            setMetaTag(k, v) { eng.meta[k] = v; },
+            addText(style, text) {
+                eng.requireOpen('addText');
+                if (!(style in TextStyleType)) throw new Error('mock: addText with an unknown text style ' + style);
+                if (!eng.state.frame) eng.state.frame = { elements: [] };
+                eng.state.frame.elements.push({ id: eng.id(), type: Element.TEXT, subStyle: TextStyleType[style], text });
+            },
+            addRemoveSystemLocks(interval, lock) {
+                eng.requireOpen('addRemoveSystemLocks');
+                if (eng.selection.kind !== 'range') return;          // works on the selected bars
+                eng.state.locks = lock ? 'as laid out' : (interval || null);
+            },
             get nmeasures() { return eng.state.measures.length; },
             get firstMeasure() { eng.counters.firstMeasure++; return eng.wrapMeasure(0); },
             get lastMeasure() { return eng.wrapMeasure(eng.state.measures.length - 1); },
@@ -481,35 +719,177 @@ class MockMuseScore {
                 eng.counters.endCmd++;
                 if (!eng.open) throw new Error('mock: endCmd without startCmd');
                 if (rollback) eng.restore(eng.open);
-                else if (eng.snapshot() !== eng.open) eng.undoStack.push(eng.open);
+                else if (eng.snapshot() !== eng.open) { eng.undoStack.push(eng.open); eng.redoStack = []; }
                 eng.open = null;
             },
         };
+        return api;
+    }
+
+    // A MuseScore action that is its own undo step (run outside plugin commands).
+    ownCommand(name, fn) {
+        if (this.open) throw new Error('mock: ' + name + ' dispatched inside a plugin command');
+        const before = this.snapshot();
+        fn();
+        if (this.snapshot() !== before) { this.undoStack.push(before); this.redoStack = []; }
+    }
+
+    rangeSel(name) {
+        if (this.selection.kind !== 'range') throw new Error('mock: ' + name + ' needs a range selection');
+        return this.selection.range;
+    }
+
+    // Shifts everything at or after `tick` by `delta` ticks.
+    shiftFrom(tick, delta) {
+        for (const m of this.state.measures) if (m.tick >= tick) m.tick += delta;
+        for (const t in this.state.crs) for (const c of this.state.crs[t]) if (c.tick >= tick) c.tick += delta;
+        for (const a of this.state.anns) if (a.tick >= tick) a.tick += delta;
+        for (const s in this.state.keys) for (const k of this.state.keys[s]) if (k.tick >= tick && k.tick > 0) k.tick += delta;
+        for (const s in this.state.clefs) for (const c of this.state.clefs[s]) if (c.tick >= tick && c.tick > 0) c.tick += delta;
+    }
+
+    insertMeasureBefore(tick) {
+        const i = this.measureIndexAt(tick);
+        const m = this.state.measures[i];
+        const at = m.tick;
+        this.shiftFrom(at, m.ticks);
+        this.state.measures.splice(i, 0, { id: this.id(), tick: at, ticks: m.ticks, num: m.num, den: m.den,
+                                           repeatStart: false, repeatEnd: false, repeatCount: 2, elements: [] });
+        for (let s = 0; s < this.state.nstaves; s++) this.insertCr(this.newCr(s * VOICES, at, m.ticks, m.ticks, null));
+    }
+
+    deleteBars(start, end) {
+        for (const t in this.state.crs) {
+            for (const c of this.state.crs[t].filter(x => x.tick >= start && x.tick < end)) this.removeCr(c);
+        }
+        this.state.anns = this.state.anns.filter(a => a.tick < start || a.tick >= end);
+        this.state.measures = this.state.measures.filter(m => m.tick < start || m.tick >= end);
+        this.shiftFrom(end, start - end);
+    }
+
+    copyRange(r) {
+        const clip = { len: r.end - r.start, staves: r.s1 - r.s0, tracks: {}, ties: [], anns: [] };
+        const noteIds = new Set();
+        for (let s = r.s0; s < r.s1; s++) {
+            for (let v = 0; v < VOICES; v++) {
+                const crs = this.trackCrs(s * VOICES + v).filter(c => c.tick >= r.start && c.tick < r.end);
+                if (!crs.length) continue;
+                clip.tracks[(s - r.s0) * VOICES + v] = crs.map(c => {
+                    c.notes.forEach(n => noteIds.add(n.id));
+                    return JSON.parse(JSON.stringify(Object.assign({}, c, { tick: c.tick - r.start })));
+                });
+            }
+        }
+        for (const id in this.state.ties) {
+            const tie = this.state.ties[id];
+            if (noteIds.has(tie.start) && noteIds.has(tie.end)) clip.ties.push([tie.start, tie.end]);
+        }
+        for (const a of this.state.anns) {
+            const s = this.staffOf(a.track);
+            if (a.tick >= r.start && a.tick < r.end && s >= r.s0 && s < r.s1) {
+                clip.anns.push(Object.assign({}, a, { tick: a.tick - r.start, track: a.track - r.s0 * VOICES }));
+            }
+        }
+        return clip;
+    }
+
+    paste(r, clip) {
+        const start = r.start, end = r.start + clip.len;
+        if (r.s0 + clip.staves > this.state.nstaves) throw new Error('mock: paste past the last staff');
+        const newIds = {};
+        for (const rel in clip.tracks) {
+            const track = r.s0 * VOICES + (+rel);
+            for (const c of this.trackCrs(track)) {
+                if (c.tick < start && c.tick + c.actual > start) throw new Error('mock: paste target starts inside a held note');
+                if (c.tick >= start && c.tick < end && c.tick + c.actual > end) throw new Error('mock: paste target ends inside a held note');
+            }
+            for (const c of this.trackCrs(track).filter(x => x.tick >= start && x.tick < end)) this.removeCr(c);
+            for (const src of clip.tracks[rel]) {
+                const c = JSON.parse(JSON.stringify(src));
+                c.id = this.id();
+                c.track = track;
+                c.tick += start;
+                c.notes.forEach(n => { const old = n.id; n.id = this.id(); newIds[old] = n.id; n.tieFor = null; n.tieBack = null; });
+                c.lyrics.forEach(l => { l.id = this.id(); });
+                c.arts.forEach(a => { a.id = this.id(); });
+                this.insertCr(c);
+            }
+        }
+        for (const [a, b] of clip.ties) this.addTie(newIds[a], newIds[b]);
+        for (const a of clip.anns) {
+            this.state.anns.push(Object.assign({}, a, { id: this.id(), tick: a.tick + start, track: a.track + r.s0 * VOICES }));
+        }
+    }
+
+    // Deleting a range selection: chords become rests; voices 2-4 go.
+    deleteRange(r) {
+        for (let s = r.s0; s < r.s1; s++) {
+            for (let v = 0; v < VOICES; v++) {
+                for (const c of this.trackCrs(s * VOICES + v).filter(x => x.tick >= r.start && x.tick < r.end)) {
+                    if (v === 0) { if (!c.rest) this.deleteCr(c); } else this.removeCr(c);
+                }
+            }
+        }
+        this.state.anns = this.state.anns.filter(a => !(a.tick >= r.start && a.tick < r.end &&
+                                                         this.staffOf(a.track) >= r.s0 && this.staffOf(a.track) < r.s1));
     }
 
     cmd(code) {
         this.log.push(code);
-        if (code === 'action://notation/cancel') {
-            if (this.noteEntryMode) { this.noteEntryMode = false; return; }
-            this.selection = { kind: 'none', els: [], range: null };
-            return;
-        }
-        if (code === 'action://notation/undo') {
-            if (this.open) return;                 // the plugin command locks the undo stack
-            const s = this.undoStack.pop();
-            if (s) this.restore(s);
-            return;
-        }
-        if (code === 'tie') {
-            this.counters.tieCmd++;
-            this.requireOpen('cmd("tie")');
-            if (this.noteEntryMode) {
-                // NotationNoteInput::addTie: adds a tied note after the input position
-                const el = this.selection.els[0];
-                if (el) { const { cr } = this.findNote(el.id); this.setNoteRest(this.nextInputPos(cr.tick, cr.track), cr.track, 60, this.inputDuration); }
+        switch (code) {
+            case 'action://notation/cancel':
+                if (this.noteEntryMode) { this.noteEntryMode = false; return; }
+                this.selection = { kind: 'none', els: [], range: null };
+                return;
+            case 'action://notation/undo': {
+                if (this.open) return;                 // the plugin command locks the undo stack
+                const s = this.undoStack.pop();
+                if (s) { this.redoStack.push(this.snapshot()); this.restore(s); }
                 return;
             }
-            this.cmdToggleTie();
+            case 'action://notation/redo': {
+                if (this.open) return;
+                const s = this.redoStack.pop();
+                if (s) { this.undoStack.push(this.snapshot()); this.restore(s); }
+                return;
+            }
+            case 'action://notation/copy':
+                this.clipboard = this.copyRange(this.rangeSel('copy'));
+                return;
+            case 'action://notation/paste': {
+                const r = this.rangeSel('paste');
+                if (!this.clipboard) return;
+                this.ownCommand('paste', () => this.paste(r, this.clipboard));
+                return;
+            }
+            case 'insert-measure': {
+                const r = this.rangeSel('insert-measure');
+                this.ownCommand('insert-measure', () => this.insertMeasureBefore(r.start));
+                return;
+            }
+            case 'time-delete': {
+                const r = this.rangeSel('time-delete');
+                this.ownCommand('time-delete', () => this.deleteBars(r.start, r.end));
+                return;
+            }
+            case 'action://notation/delete': {
+                const r = this.rangeSel('delete');
+                this.ownCommand('delete', () => this.deleteRange(r));
+                return;
+            }
+            case 'tie':
+                this.counters.tieCmd++;
+                this.requireOpen('cmd("tie")');
+                if (this.noteEntryMode) {
+                    // NotationNoteInput::addTie: adds a tied note after the input position
+                    const el = this.selection.els[0];
+                    if (el) { const { cr } = this.findNote(el.id); this.setNoteRest(this.nextInputPos(cr.tick, cr.track), cr.track, 60, this.inputDuration); }
+                    return;
+                }
+                this.cmdToggleTie();
+                return;
+            default:
+                return;                                // file-save etc.: only logged
         }
     }
 
@@ -525,31 +905,44 @@ class MockMuseScore {
             console: { log() {}, warn() {}, error() {} },
             get curScore() { return score; },
             Element, Segment: SegmentType, Cursor: { SCORE_START: 0, SELECTION_START: 1, SELECTION_END: 2 },
-            Lyrics: { SINGLE: 0, BEGIN: 1, END: 2, MIDDLE: 3 }, DynamicType: {}, MarkerType: {}, KeyMode: { MAJOR: 1, MINOR: 0 },
-            newElement(type) { return type === Element.NOTE ? { __newNote: true, pitch: 60 } : { type }; },
-            removeElement() {},
+            Lyrics: { SINGLE: 0, BEGIN: 1, END: 2, MIDDLE: 3 }, DynamicType, MarkerType: {}, KeyMode: { MAJOR: 1, MINOR: 0 },
+            Tid, ClefType, LayoutBreak, SymId,
+            newElement(type) { return type === Element.NOTE ? { __newNote: true, type, pitch: 60 } : { type }; },
+            removeElement(el) { eng.removeElement(el); },
+            writeScore(s, p, ext) {
+                if (s !== score) return false;
+                if (/missing-folder/.test(p)) return false;
+                eng.exports.push({ path: p, ext });
+                return true;
+            },
             cmd(code) { eng.cmd(code); },
             fraction(n, d) { return { numerator: n, denominator: d, ticks: WHOLE * n / d }; },
             fractionFromTicks(t) { return eng.frac(t); },
             api: { websocketserver: { listen() {}, onMessage() {}, send(id, text) { eng.replies.push(JSON.parse(text)); } } },
         };
         this.plugin = vm.runInNewContext(js, sandbox, { filename: 'musescore-mcp-websocket.qml.js' });
+        this.plugin.get('onRun')();            // MuseScore runs the plugin
+        for (const k in this.counters) this.counters[k] = 0;
         return this.plugin;
     }
 
     // Sends one request through processMessage, as the websocket would.
     call(action, params) {
         const msg = params === undefined ? { action } : { action, params };
-        this.plugin.get('processMessage')(JSON.stringify(msg), 1);
-        const reply = this.replies.pop();
-        return reply.status === 'success' ? reply.result : { error: reply.message };
+        return this.raw(msg);
     }
 
     raw(obj) {
         this.plugin.get('processMessage')(JSON.stringify(obj), 1);
         const reply = this.replies.pop();
+        this.lastVersion = reply.version;
         return reply.status === 'success' ? reply.result : { error: reply.message };
+    }
+
+    // Edits made "by the user in MuseScore": outside any plugin command, as an undo step.
+    userEdit(fn) {
+        this.ownCommand('user edit', () => fn(this));
     }
 }
 
-module.exports = { MockMuseScore, Element, WHOLE, tdurationTicks };
+module.exports = { MockMuseScore, Element, WHOLE, tdurationTicks, Tid, ClefType, LayoutBreak, DynamicType };

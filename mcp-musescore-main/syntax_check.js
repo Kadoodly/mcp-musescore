@@ -44,9 +44,9 @@ function qmlToJs(qml) {
                 continue;
             }
         }
-        // Track depth, ignoring braces inside strings, regexes and comments
-        // well enough for this file (braces there are balanced or absent).
-        const code = text.replace(/\/\/.*$/, '').replace(/"(?:[^"\\]|\\.)*"/g, '""').replace(/'(?:[^'\\]|\\.)*'/g, "''");
+        // Track depth, ignoring braces inside strings and comments (strings
+        // first: "action://notation/paste" is not a comment).
+        const code = text.replace(/"(?:[^"\\]|\\.)*"/g, '""').replace(/'(?:[^'\\]|\\.)*'/g, "''").replace(/\/\/.*$/, '');
         for (const ch of code) {
             if (ch === '{') depth++;
             else if (ch === '}') depth--;

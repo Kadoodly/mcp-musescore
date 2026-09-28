@@ -21,6 +21,9 @@ MuseScore {
     // in MuseScore and the cursor moves there.
     property string lastSelectionSig: ""
 
+    // The current MuseScore selection was made by the user (not by the plugin).
+    property bool selectionFromUser: false
+
     // Nesting depth of startCmd/endCmd. Only the outermost call opens a
     // MuseScore command, so nested helpers can't commit it early.
     property int cmdDepth: 0
@@ -45,6 +48,18 @@ MuseScore {
     // back if an engine error was raised inside it.
     property var commitProbe: null
 
+    // ---- Score versions ----
+    // Every change to the score, by this plugin or by the user in MuseScore,
+    // raises scoreVersion. Changes are found by comparing a digest of each
+    // bar with the one stored after the last read or edit (MuseScore 4 doesn't
+    // tell plugins about edits), and the log records which bars changed.
+    property int scoreVersion: 0
+    property var versionLog: []          // [{version, source, action, bars: [[first, last], ...] or null = unknown}]
+    property var barDigests: null        // digest per bar (index = bar number - 1); null = no baseline yet
+    property var touchedTicks: null      // [[startTick, endTick]] edited by the running request; [] = unknown
+    property var lastScore: null
+    readonly property int maxLogEntries: 500
+
     readonly property int ticksPerWhole: 1920
 
     // ========================================
@@ -56,7 +71,7 @@ MuseScore {
         var reply;
         try {
             var command = JSON.parse(message);
-            reply = { status: "success", result: processCommand(command) };
+            reply = { status: "success", result: handleRequest(command) };
         } catch (e) {
             console.log("Error processing command: " + e.toString());
             reply = { status: "error", message: e.toString() };
@@ -67,7 +82,64 @@ MuseScore {
         } catch (e2) {
             console.log("UI sync failed: " + e2.toString());
         }
+        reply.version = scoreVersion;
         api.websocketserver.send(clientId, JSON.stringify(reply));
+    }
+
+    // Actions that never change the score. Everything else is an edit: it may
+    // carry expectedVersion, and afterwards the version is raised.
+    property var readOnlyActions: [
+        "ping", "getScore", "syncStateToSelection", "getCursorInfo", "setCursor", "goToMeasure",
+        "goToBeginningOfScore", "goToFinalMeasure", "nextElement", "prevElement", "nextStaff", "prevStaff",
+        "selectCurrentMeasure", "selectCustomRange", "getVersion", "getChangesSince", "getSelection",
+        "checkScore", "exportScore", "saveScore"
+    ]
+
+    function isEdit(command) {
+        if (command.action === "processSequence") {
+            var steps = (command.params && command.params.sequence) || [];
+            for (var i = 0; i < steps.length; i++) {
+                if (steps[i] && readOnlyActions.indexOf(steps[i].action) < 0) return true;
+            }
+            return false;
+        }
+        return readOnlyActions.indexOf(command.action) < 0;
+    }
+
+    // One request from the MCP server: version check, the action, version update.
+    function handleRequest(command) {
+        checkCommand(command, true);
+        if (!curScore) return processCommand(command);
+        noteScoreSwitch();
+
+        var edit = isEdit(command);
+        var params = command.params || {};
+        if (isSet(params.expectedVersion)) {
+            checkInt(params.expectedVersion, "expectedVersion", 0, null);
+            var expected = params.expectedVersion;
+            delete params.expectedVersion;
+            detectUserChanges();
+            if (expected !== scoreVersion) {
+                throw new Error("The score changed since version " + expected + " (it is now version " + scoreVersion +
+                                "). Nothing was done. Get the changes (get_changes_since) or reload, then redo the edit.");
+            }
+        }
+        if (!edit) return processCommand(command);
+
+        touchedTicks = [];
+        var result, failure = null;
+        try {
+            result = processCommand(command);
+        } catch (e) {
+            failure = e;
+        }
+        try {
+            recordChange(command.action, !failure && !(result && result.error));
+        } finally {
+            touchedTicks = null;
+        }
+        if (failure) throw failure;
+        return result;
     }
 
     // Allowed params per action. Unknown actions and unknown params are errors,
@@ -75,13 +147,15 @@ MuseScore {
     // "tie") took effect.
     property var actionParams: ({
         "ping": [],
-        "getScore": [],
+        "getScore": ["startMeasure", "endMeasure"],
+        "getVersion": [],
+        "getChangesSince": ["version"],
         "syncStateToSelection": [],
         "undo": ["steps"],
         "processSequence": ["sequence", "atomic"],
         "getCursorInfo": [],
-        "setCursor": ["staff", "voice", "measure", "tick"],
-        "goToMeasure": ["measure", "staff", "voice"],
+        "setCursor": ["staff", "voice", "measure", "tick", "offset"],
+        "goToMeasure": ["measure", "staff", "voice", "offset"],
         "goToBeginningOfScore": ["staff", "voice"],
         "goToFinalMeasure": ["staff", "voice"],
         "nextElement": ["numElements"],
@@ -90,14 +164,14 @@ MuseScore {
         "prevStaff": ["count"],
         "selectCurrentMeasure": ["allStaves", "staff", "voice", "measure", "tick"],
         "selectCustomRange": ["startTick", "endTick", "startStaff", "endStaff"],
-        "addNote": ["pitch", "duration", "advanceCursorAfterAction", "addToChord", "tie", "staff", "voice", "measure", "tick"],
-        "addRest": ["duration", "advanceCursorAfterAction", "staff", "voice", "measure", "tick"],
-        "addTuplet": ["duration", "ratio", "advanceCursorAfterAction", "staff", "voice", "measure", "tick"],
-        "writeVoice": ["events", "staff", "voice", "measure", "tick"],
-        "addLyrics": ["lyrics", "verse", "staff", "voice", "measure", "tick"],
-        "addDynamic": ["dynamic", "staff", "voice", "measure", "tick"],
-        "addFermata": ["staff", "voice", "measure", "tick"],
-        "setTempo": ["bpm", "text", "measure", "tick"],
+        "addNote": ["pitch", "duration", "advanceCursorAfterAction", "addToChord", "tie", "staff", "voice", "measure", "tick", "offset"],
+        "addRest": ["duration", "advanceCursorAfterAction", "staff", "voice", "measure", "tick", "offset"],
+        "addTuplet": ["duration", "ratio", "advanceCursorAfterAction", "staff", "voice", "measure", "tick", "offset"],
+        "writeVoice": ["events", "staff", "voice", "measure", "tick", "offset"],
+        "addLyrics": ["lyrics", "verse", "staff", "voice", "measure", "tick", "offset"],
+        "addDynamic": ["dynamic", "staff", "voice", "measure", "tick", "offset"],
+        "addFermata": ["staff", "voice", "measure", "tick", "offset"],
+        "setTempo": ["bpm", "beatUnit", "text", "measure", "tick", "offset"],
         "appendMeasure": ["count"],
         "insertMeasure": ["measure", "count"],
         "deleteSelection": ["measure", "staff"],
@@ -105,25 +179,41 @@ MuseScore {
         "removeRepeat": ["startMeasure", "endMeasure"],
         "addMarker": ["type", "measure"],
         "addJump": ["type", "measure"],
-        "addRehearsalMark": ["text", "measure", "tick"],
+        "addRehearsalMark": ["text", "measure", "tick", "offset"],
         "setKeySignature": ["fifths", "measure", "mode", "staff"],
-        "addGradualTempoChange": ["type", "measure", "tick", "endMeasure", "endTick", "targetBpm", "factor", "aTempo"],
-        "removeMarking": ["kind", "tick", "measure", "staff"],
+        "addGradualTempoChange": ["type", "measure", "tick", "endMeasure", "endTick", "targetBpm", "factor", "aTempo", "offset"],
+        "removeMarking": ["kind", "tick", "measure", "staff", "offset"],
         "addSlur": ["startTick", "endTick", "startMeasure", "endMeasure", "staff"],
         "addHairpin": ["type", "startTick", "endTick", "startMeasure", "endMeasure", "staff"],
         "addArticulation": ["type", "startTick", "endTick", "startMeasure", "endMeasure", "staff"],
         "deleteMeasures": ["startMeasure", "endMeasure"],
-        "copyMeasures": ["startMeasure", "endMeasure", "toMeasure", "insert", "staff"],
+        "copyMeasures": ["startMeasure", "endMeasure", "toMeasure", "insert", "staff", "toStaff", "transpose"],
         "addInstrument": ["instrumentId"],
         "removeInstrument": ["part", "staff"],
         "setStaffMute": ["staff", "mute"],
         "setInstrumentSound": ["staff", "instrumentId"],
-        "setTimeSignature": ["numerator", "denominator", "measure"]
+        "setTimeSignature": ["numerator", "denominator", "measure"],
+        "transpose": ["semitones", "startMeasure", "endMeasure", "startTick", "endTick", "staves", "voices"],
+        "clearRange": ["startMeasure", "endMeasure", "startTick", "endTick", "staves", "voices", "markings"],
+        "replaceSection": ["startMeasure", "endMeasure", "parts", "clearOtherVoices"],
+        "addText": ["text", "kind", "staff", "voice", "measure", "tick", "offset"],
+        "addChordSymbol": ["text", "staff", "measure", "tick", "offset"],
+        "addPedalMarks": ["startMeasure", "endMeasure", "startTick", "endTick", "staff"],
+        "addClef": ["type", "staff", "measure", "tick", "offset"],
+        "addLayoutBreak": ["type", "measure"],
+        "setMeasuresPerSystem": ["count"],
+        "setScoreInfo": ["title", "subtitle", "composer", "lyricist"],
+        "exportScore": ["path", "format"],
+        "saveScore": [],
+        "redo": ["steps"],
+        "getSelection": [],
+        "checkScore": []
     })
 
     // Throws unless the command is {action, params} with a known action and
-    // only the params that action accepts.
-    function checkCommand(command) {
+    // only the params that action accepts. A top-level edit may also carry
+    // expectedVersion (inside a sequence, only the sequence itself may).
+    function checkCommand(command, topLevel) {
         if (!isPlainObject(command)) throw new Error("A command must be an object {action, params}");
         checkKeys(command, ["action", "params"], "Command");
         if (typeof command.action !== "string" || !hasKey(actionParams, command.action)) {
@@ -132,11 +222,13 @@ MuseScore {
         if (isSet(command.params) && !isPlainObject(command.params)) {
             throw new Error(command.action + ": params must be an object");
         }
-        checkKeys(command.params || {}, actionParams[command.action], command.action);
+        var allowed = actionParams[command.action];
+        if (topLevel && isEdit(command)) allowed = allowed.concat(["expectedVersion"]);
+        checkKeys(command.params || {}, allowed, command.action);
     }
 
     function processCommand(command) {
-        checkCommand(command);
+        checkCommand(command, false);
         console.log("Processing command: " + command.action);
         var params = command.params || {};
 
@@ -149,6 +241,8 @@ MuseScore {
         switch (command.action) {
             // Core operations
             case "getScore":                return getScore(params);
+            case "getVersion":              return getVersion(params);
+            case "getChangesSince":         return getChangesSince(params);
             case "syncStateToSelection":    return getCursorInfo(params);
             case "ping":                    return "pong";
             case "undo":                    return undo(params);
@@ -207,6 +301,23 @@ MuseScore {
             case "setStaffMute":            return setStaffMute(params);
             case "setInstrumentSound":      return setInstrumentSound(params);
             case "setTimeSignature":        return setTimeSignature(params);
+
+            // Range operations and score tools
+            case "transpose":               return transposeRange(params);
+            case "clearRange":              return clearRange(params);
+            case "replaceSection":          return replaceSection(params);
+            case "addText":                 return addText(params);
+            case "addChordSymbol":          return addChordSymbol(params);
+            case "addPedalMarks":           return addPedalMarks(params);
+            case "addClef":                 return addClef(params);
+            case "addLayoutBreak":          return addLayoutBreak(params);
+            case "setMeasuresPerSystem":    return setMeasuresPerSystem(params);
+            case "setScoreInfo":            return setScoreInfo(params);
+            case "exportScore":             return exportScore(params);
+            case "saveScore":               return saveScore(params);
+            case "redo":                    return redo(params);
+            case "getSelection":            return getSelection(params);
+            case "checkScore":              return checkScore(params);
 
             default:
                 throw new Error("Unknown command: " + command.action);
@@ -324,6 +435,7 @@ MuseScore {
         } else {
             undoCursorStack.push(before);
             if (undoCursorStack.length > 200) undoCursorStack.shift();
+            redoCursorStack = [];
         }
         return result;
     }
@@ -508,8 +620,16 @@ MuseScore {
         if (cursorState.tick < 0) cursorState.tick = 0;
     }
 
+    // Position inside a bar: "0" or a fraction of a whole note ("3/8" = three
+    // eighths after the barline).
+    function parseOffset(value) {
+        if (value === 0 || value === "0") return 0;
+        return parseDuration(value, "offset");
+    }
+
     // Resolves the target position of an action from its params, falling back
-    // to the plugin cursor. Accepts tick, measure (1-based), staff and voice.
+    // to the plugin cursor. Accepts tick, measure (1-based) with an optional
+    // offset into the bar, staff and voice.
     function resolveTarget(params) {
         clampCursorToScore();
         params = params || {};
@@ -531,9 +651,20 @@ MuseScore {
             if (!(isInt(params.tick) && params.tick >= 0 && params.tick <= scoreEndTick())) {
                 throw new Error("Invalid tick " + params.tick + " (score ends at tick " + scoreEndTick() + ")");
             }
+            if (isSet(params.offset)) throw new Error("Give offset with measure, not with tick");
             t.tick = params.tick;
         } else if (isSet(params.measure)) {
-            t.tick = measureByNumber(params.measure).startTick;
+            var m = measureByNumber(params.measure);
+            t.tick = m.startTick;
+            if (isSet(params.offset)) {
+                var off = parseOffset(params.offset);
+                if (off >= m.endTick - m.startTick) {
+                    throw new Error("offset " + ticksText(off) + " is past the end of bar " + m.number + " (" + m.numerator + "/" + m.denominator + ")");
+                }
+                t.tick += off;
+            }
+        } else if (isSet(params.offset)) {
+            throw new Error("offset needs measure (it is the position inside that bar)");
         }
         return t;
     }
@@ -620,6 +751,7 @@ MuseScore {
         }
         if (sig === lastSelectionSig) return;
         lastSelectionSig = sig;
+        selectionFromUser = sig !== "";
         if (sig === "") return;
 
         var sel = curScore.selection;
@@ -647,6 +779,7 @@ MuseScore {
     // Must be called outside of a command.
     function showCursor() {
         uiDirty = false;
+        selectionFromUser = false;
         try {
             clampCursorToScore();
             var t = cursorState;
@@ -684,6 +817,7 @@ MuseScore {
         }
         lastSelectionSig = selectionSignature();
         uiDirty = false;   // this selection is deliberate; don't replace it with the cursor
+        selectionFromUser = false;
         return ok;
     }
 
@@ -694,6 +828,8 @@ MuseScore {
     function processElement(element) {
         if (!element) return null;
         if (element.name !== "Chord" && element.name !== "Rest") return null;
+        // A deleted rest of voices 2-4 stays as an invisible "gap": not music
+        if (element.name === "Rest" && element.gap === true) return null;
 
         var base = {
             name: element.name,
@@ -869,6 +1005,7 @@ MuseScore {
         var steps = isSet(params.steps) ? checkInt(params.steps, "steps", 1, 1000) : 1;
         for (var i = 0; i < steps; i++) {
             cmd("action://notation/undo");
+            redoCursorStack.push(copyCursor(cursorState));
             if (undoCursorStack.length > 0) cursorState = undoCursorStack.pop();
         }
         return navResult("Undid " + steps + " step(s)");
@@ -883,7 +1020,9 @@ MuseScore {
         "setInstrumentSound", "undo",
         "addRepeat", "removeRepeat", "addMarker", "addJump", "addRehearsalMark",
         "setKeySignature", "addGradualTempoChange", "removeMarking", "addSlur", "addHairpin",
-        "addArticulation", "deleteMeasures", "copyMeasures"
+        "addArticulation", "deleteMeasures", "copyMeasures",
+        "transpose", "clearRange", "replaceSection", "addText", "addChordSymbol", "addPedalMarks", "addClef",
+        "addLayoutBreak", "setMeasuresPerSystem", "setScoreInfo", "redo"
     ]
 
     // Actions that change the MuseScore selection before running a command
@@ -891,7 +1030,8 @@ MuseScore {
     // between commands).
     property var nonAtomicCommands: [
         "undo", "deleteSelection", "insertMeasure", "selectCurrentMeasure", "selectCustomRange",
-        "addSlur", "addHairpin", "addArticulation", "deleteMeasures", "copyMeasures", "processSequence"
+        "addSlur", "addHairpin", "addArticulation", "deleteMeasures", "copyMeasures", "processSequence", "redo",
+        "setMeasuresPerSystem"
     ]
 
     // Checks every step before anything runs: known sequence action, known params.
@@ -1280,66 +1420,184 @@ MuseScore {
         return pieces;
     }
 
-    function checkPitchList(list, label) {
-        if (!Array.isArray(list) || list.length === 0) throw new Error(label + " must be a non-empty list of MIDI pitches");
-        for (var i = 0; i < list.length; i++) {
-            checkInt(list[i], label + " entry", 0, 127);
-            if (list.indexOf(list[i]) !== i) throw new Error(label + " lists pitch " + list[i] + " twice");
-        }
-        return list.slice();
+    // Note names: letter, accidentals (# ## b bb), octave; C4 is middle C (60).
+    // Returns {pitch, tpc}: the tpc keeps the spelling (F#4 vs Gb4).
+    function parseNoteName(name, label) {
+        var m = /^([A-Ga-g])(##|#|bb|b)?(-1|[0-9])$/.exec(String(name).trim());
+        if (!m) throw new Error(label + ": " + JSON.stringify(name) + " is not a MIDI pitch or a note name like C4, F#3, Bb5");
+        var letter = m[1].toUpperCase();
+        var alter = { "": 0, "#": 1, "##": 2, "b": -1, "bb": -2 }[m[2] || ""];
+        var steps = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+        var baseTpc = { F: 13, C: 14, G: 15, D: 16, A: 17, E: 18, B: 19 };
+        var pitch = (parseInt(m[3], 10) + 1) * 12 + steps[letter] + alter;
+        if (pitch < 0 || pitch > 127) throw new Error(label + ": " + name + " is outside MIDI 0-127");
+        return { pitch: pitch, tpc: baseTpc[letter] + 7 * alter };
     }
 
-    // Checks writeVoice events before anything is written. Returns
-    // [{rest, pitches, ticks, tie}], tie being the list of tied pitches.
-    function parseVoiceEvents(events) {
+    // Pitches given as MIDI numbers or note names. Returns the MIDI pitches;
+    // names are recorded in `spell` (pitch -> tpc).
+    function checkPitchList(list, label, spell) {
+        if (!Array.isArray(list) || list.length === 0) throw new Error(label + " must be a non-empty list of MIDI pitches or note names");
+        var out = [];
+        for (var i = 0; i < list.length; i++) {
+            var p;
+            if (typeof list[i] === "string") {
+                var named = parseNoteName(list[i], label);
+                p = named.pitch;
+                if (spell) spell[p] = named.tpc;
+            } else {
+                p = checkInt(list[i], label + " entry", 0, 127);
+            }
+            if (out.indexOf(p) >= 0) throw new Error(label + " lists pitch " + p + " twice");
+            out.push(p);
+        }
+        return out;
+    }
+
+    property var articulationSymbols: ({
+        "staccato": "articStaccatoAbove", "staccatissimo": "articStaccatissimoAbove", "tenuto": "articTenutoAbove",
+        "accent": "articAccentAbove", "marcato": "articMarcatoAbove", "portato": "articTenutoStaccatoAbove",
+        "accent-staccato": "articAccentStaccatoAbove", "marcato-staccato": "articMarcatoStaccatoAbove",
+        "stress": "articStressAbove", "unstress": "articUnstressAbove"
+    })
+
+    // The markings an event may carry, checked.
+    function parseMarks(ev, where, isRest) {
+        var marks = {};
+        if (isSet(ev.dynamic)) {
+            var name = String(ev.dynamic).toLowerCase();
+            var type = dynamicTypeValue(name);
+            if (type === undefined || type === DynamicType.OTHER) throw new Error(where + ": unknown dynamic '" + ev.dynamic + "'");
+            marks.dynamic = name;
+        }
+        if (isSet(ev.articulations)) {
+            if (!Array.isArray(ev.articulations)) throw new Error(where + ": articulations must be a list");
+            for (var i = 0; i < ev.articulations.length; i++) {
+                var a = ev.articulations[i];
+                if (a !== "fermata" && !hasKey(articulationSymbols, a)) {
+                    throw new Error(where + ": unknown articulation '" + a + "' (known: fermata, " + Object.keys(articulationSymbols).join(", ") + ")");
+                }
+                if (isRest && a !== "fermata") throw new Error(where + ": a rest can only have a fermata, not " + a);
+            }
+            marks.articulations = ev.articulations.slice();
+        }
+        if (isSet(ev.lyric)) {
+            if (isRest) throw new Error(where + ": a rest can't have a lyric");
+            if (typeof ev.lyric !== "string" || !ev.lyric.length) throw new Error(where + ": lyric must be a non-empty string");
+            marks.lyric = ev.lyric;
+        }
+        ["text", "chord"].forEach(function(key) {
+            if (isSet(ev[key])) {
+                if (typeof ev[key] !== "string" || !ev[key].length) throw new Error(where + ": " + key + " must be a non-empty string");
+                marks[key] = ev[key];
+            }
+        });
+        return marks;
+    }
+
+    // "3:2" -> {actual: 3, normal: 2}
+    function parseTupletRatio(value, where) {
+        var m = /^\s*(\d+)\s*:\s*(\d+)\s*$/.exec(String(value));
+        if (!m) throw new Error(where + ": tuplet must look like \"3:2\" (3 notes in the time of 2)");
+        var a = parseInt(m[1], 10), n = parseInt(m[2], 10);
+        if (a < 2 || n < 1 || a === n) throw new Error(where + ": tuplet " + value + " is not a tuplet ratio");
+        return { actual: a, normal: n };
+    }
+
+    // Checks writeVoice events before anything is written. Returns events
+    // {kind: "note"|"rest"|"tuplet", ...}: notes/rests with pitches, spell,
+    // ticks, tie (tied pitches) and marks; tuplets with their inner events.
+    function parseVoiceEvents(events, inTuplet) {
         if (!Array.isArray(events) || events.length === 0) throw new Error("events must be a non-empty list of notes, chords and rests");
         var out = [];
         for (var i = 0; i < events.length; i++) {
             var ev = events[i];
-            var where = "Event " + i;
+            var where = (inTuplet ? "Tuplet event " : "Event ") + i;
             if (!isPlainObject(ev)) throw new Error(where + " must be an object");
-            checkKeys(ev, ["pitches", "rest", "duration", "tie"], where);
+            if (isSet(ev.tuplet) && !inTuplet) {
+                checkKeys(ev, ["tuplet", "events"], where);
+                var ratio = parseTupletRatio(ev.tuplet, where);
+                var inner = parseVoiceEvents(ev.events, true);
+                var nominal = 0, actual = 0;
+                for (var k = 0; k < inner.length; k++) {
+                    if (noteValueTicks.indexOf(inner[k].ticks) < 0) {
+                        throw new Error(where + ": inside a tuplet each duration must be one plain or dotted value, got " + ticksText(inner[k].ticks));
+                    }
+                    var act = inner[k].ticks * ratio.normal / ratio.actual;
+                    if (!isInt(act)) throw new Error(where + ": " + ticksText(inner[k].ticks) + " in a " + ev.tuplet + " tuplet doesn't fall on whole ticks");
+                    inner[k].actual = act;
+                    nominal += inner[k].ticks;
+                    actual += act;
+                }
+                // n:m holds n parts of one note value (the base), and lasts m of them
+                var base = nominal / ratio.actual;
+                if (noteValueTicks.indexOf(base) < 0 || noteValueTicks.indexOf(base * ratio.normal) < 0) {
+                    throw new Error(where + ": the notes of a " + ev.tuplet + " tuplet must add up to " + ratio.actual +
+                                    " times one note value (e.g. three 1/8 = 3/8 in 3:2, five 1/16 = 5/16 in 5:4), got " + ticksText(nominal));
+                }
+                for (k = 0; k < inner.length; k++) inner[k].label = "event " + i + " (note " + k + " of the tuplet)";
+                out.push({ kind: "tuplet", ratio: ratio, inner: inner, ticks: actual, nominal: nominal });
+                continue;
+            }
+            checkKeys(ev, ["pitches", "rest", "duration", "tie", "dynamic", "articulations", "lyric", "text", "chord"], where);
             if (!isSet(ev.duration)) throw new Error(where + ": missing duration");
             var ticks = parseDuration(ev.duration, where + " duration");
             if (isSet(ev.rest) && typeof ev.rest !== "boolean") throw new Error(where + ": rest must be true or false");
             if (ev.rest === true) {
                 if (isSet(ev.pitches)) throw new Error(where + ": a rest can't have pitches");
                 if (isSet(ev.tie) && ev.tie !== false) throw new Error(where + ": a rest can't be tied");
-                out.push({ rest: true, pitches: [], ticks: ticks, tie: [] });
+                out.push({ kind: "rest", rest: true, pitches: [], spell: {}, ticks: ticks, tie: [], marks: parseMarks(ev, where, true), label: "event " + i });
                 continue;
             }
             if (!isSet(ev.pitches)) throw new Error(where + ": give \"pitches\" for a note/chord, or \"rest\": true for a rest");
-            var pitches = checkPitchList(ev.pitches, where + " pitches");
+            var spell = {};
+            var pitches = checkPitchList(ev.pitches, where + " pitches", spell);
             var tie = [];
             if (ev.tie === true) {
                 tie = pitches.slice();
             } else if (isSet(ev.tie) && ev.tie !== false) {
-                tie = checkPitchList(ev.tie, where + " tie");
-                for (var k = 0; k < tie.length; k++) {
-                    if (pitches.indexOf(tie[k]) < 0) throw new Error(where + ": tie lists pitch " + tie[k] + ", which is not in its pitches");
+                tie = checkPitchList(ev.tie, where + " tie", null);
+                for (var t = 0; t < tie.length; t++) {
+                    if (pitches.indexOf(tie[t]) < 0) throw new Error(where + ": tie lists pitch " + tie[t] + ", which is not in its pitches");
                 }
             }
-            out.push({ rest: false, pitches: pitches, ticks: ticks, tie: tie });
+            out.push({ kind: "note", rest: false, pitches: pitches, spell: spell, ticks: ticks, tie: tie, marks: parseMarks(ev, where, false), label: "event " + i });
         }
-        // A tie continues into the next event, which must hold the pitch. A tie
-        // on the last event goes to the note written after the passage.
-        for (var j = 0; j + 1 < out.length; j++) {
-            if (!out[j].tie.length) continue;
-            if (out[j + 1].rest) throw new Error("Event " + j + " is tied, but event " + (j + 1) + " is a rest");
-            for (var p = 0; p < out[j].tie.length; p++) {
-                if (out[j + 1].pitches.indexOf(out[j].tie[p]) < 0) {
-                    throw new Error("Event " + j + " ties pitch " + out[j].tie[p] + ", which event " + (j + 1) + " doesn't contain");
+        if (!inTuplet) {
+            // A tie continues into the next note/rest (inside or after a tuplet),
+            // which must hold the pitch. A tie on the very last one goes to the
+            // note written after the passage.
+            var flat = flattenEvents(out);
+            for (var j = 0; j + 1 < flat.length; j++) {
+                if (!flat[j].tie.length) continue;
+                var a = flat[j].label.charAt(0).toUpperCase() + flat[j].label.substring(1), b = flat[j + 1].label;
+                if (flat[j + 1].rest) throw new Error(a + " is tied, but " + b + " is a rest");
+                for (var p = 0; p < flat[j].tie.length; p++) {
+                    if (flat[j + 1].pitches.indexOf(flat[j].tie[p]) < 0) {
+                        throw new Error(a + " ties pitch " + flat[j].tie[p] + ", which " + b + " doesn't contain");
+                    }
                 }
             }
         }
         return out;
     }
 
+    // Notes and rests in time order, with the notes of tuplets in place.
+    function flattenEvents(events) {
+        var flat = [];
+        for (var i = 0; i < events.length; i++) {
+            if (events[i].kind === "tuplet") flat = flat.concat(events[i].inner);
+            else flat.push(events[i]);
+        }
+        return flat;
+    }
+
     // ========================================
     // WRITING NOTES AND RESTS
-    // One engine for writeVoice, addNote and addRest. Inside a command: check
-    // the target, plan the pieces, write them all through one cursor, read them
-    // back, and queue the ties (made when the command ends). No UI work here.
+    // One engine for writeVoice, addNote, addRest and replaceSection. Inside
+    // a command: prepare the start, check the target, plan the pieces, write
+    // them all through one cursor, read them back, then spelling, markings,
+    // and the ties (made when the command ends). No UI work here.
     // ========================================
 
     // The chord/rest starting at `tick` in `track`, or null.
@@ -1364,31 +1622,123 @@ MuseScore {
         return false;
     }
 
-    // Checks that [t.tick, endTick) of the target voice can be overwritten:
-    // it starts on a note/rest boundary (or where the voice is empty) and holds
-    // no tuplet. Returns warnings about what the overwrite changes nearby.
+    function fractionOfTicks(ticks) {
+        var g = gcd(ticks, ticksPerWhole);
+        return fraction(ticks / g, ticksPerWhole / g);
+    }
+
+    // The chord/rest of (staff, voice) that starts before `tick` and is still
+    // sounding at it: {tick, end, el}, or null. Chords/rests never cross a
+    // barline, so the search starts at the bar.
+    function heldAt(staff, voice, tick) {
+        var m = curScore.tick2measure(fractionFromTicks(tick));
+        if (!m) return null;
+        var c = makeCursor({ tick: m.tick.ticks, staff: staff, voice: voice });
+        if (!c.segment) return null;
+        if (!c.element) c.next();
+        while (c.segment && c.tick < tick) {
+            var el = c.element;
+            var end = c.tick + el.actualDuration.ticks;
+            if (end > tick) return { tick: c.tick, end: end, el: el };
+            c.next();
+        }
+        return null;
+    }
+
+    // Shortens a note/rest held across t so that it ends at t. The part before
+    // t stays: the same chord (with its lyrics and markings), continued by
+    // tied notes if its new length isn't one note value. What followed
+    // becomes rests, which the write then overwrites.
+    // (It is only ever shortened to one note value: ChordRest.duration =
+    // Score::changeCRlen, which for longer values fills a chord's head with
+    // rests and overlaps a rest's fill rests.)
+    function splitHeld(t, held) {
+        var el = held.el;
+        var head = t.tick - held.tick;
+        var where = "staff " + t.staff + " voice " + t.voice;
+        var isRest = el.type === Element.REST;
+        touch(held.tick, held.end);
+        var pitches = isRest ? [] : chordPitches(el);
+        var spell = {};
+        var notes = isRest ? [] : el.notes;
+        for (var i = 0; i < notes.length; i++) spell[notes[i].pitch] = notes[i].tpc1;
+        var firstLen = largestNoteValue(head);
+        el.duration = fractionOfTicks(firstLen);
+        if (firstLen < head) {
+            writeEvents({ tick: held.tick + firstLen, staff: t.staff, voice: t.voice },
+                        [{ kind: isRest ? "rest" : "note", rest: isRest, pitches: pitches, spell: spell, ticks: head - firstLen, tie: [], marks: {},
+                           label: "held note" }], false);
+            for (var p = 0; p < pitches.length; p++) queueTie(t, held.tick, pitches[p], held.tick + firstLen);
+        }
+        if (isRest) return [];      // shortening a rest to write after it is nothing to warn about
+        return ["Split the note/chord [" + pitches.join(", ") + "] at tick " + held.tick + " (" + where + ", it lasted until tick " +
+                held.end + "): the part before tick " + t.tick + " stays, the rest is overwritten"];
+    }
+
+    // Where voices 2-4 can start a rest that leads up to t: the latest point
+    // at or before t where a chord/rest of any voice starts and this voice is
+    // free up to t.
+    function gapStart(t) {
+        var m = curScore.tick2measure(fractionFromTicks(t.tick));
+        var from = m.tick.ticks;
+        var c0 = makeCursor({ tick: from, staff: t.staff, voice: 0 });
+        while (c0.segment && c0.tick <= t.tick) {
+            from = c0.tick;
+            if (!c0.next()) break;
+        }
+        var c = makeCursor({ tick: m.tick.ticks, staff: t.staff, voice: t.voice });
+        if (c.segment && !c.element) c.next();
+        while (c.segment && c.tick < t.tick) {
+            var end = c.tick + c.element.actualDuration.ticks;
+            if (end > from) from = end;
+            c.next();
+        }
+        if (from < t.tick && !curScore.findSegmentAtTick(Segment.ChordRest, fractionFromTicks(from))) {
+            throw new Error("Voice " + t.voice + " of staff " + t.staff + " can't start at tick " + t.tick +
+                            ": nothing starts at tick " + from + " to lead up to it. Write from an earlier position.");
+        }
+        return from;
+    }
+
+    // Makes a chord/rest boundary at t in its voice so that writing can start
+    // there: splits a note/rest held across t, or (voices 2-4) starts the
+    // empty stretch before t with a rest. Returns warnings.
+    function prepareStart(t) {
+        var track = t.staff * 4 + t.voice;
+        var seg = t.tick < scoreEndTick() ? curScore.findSegmentAtTick(Segment.ChordRest, fractionFromTicks(t.tick)) : null;
+        if (seg && seg.elementAt(track)) return [];
+        var held = heldAt(t.staff, t.voice, t.tick);
+        if (held) {
+            if (held.el.tuplet) {
+                throw new Error("Tick " + t.tick + " is inside a tuplet of staff " + t.staff + " voice " + t.voice +
+                                " (it starts at tick " + held.tick + "); writing into the middle of a tuplet isn't supported");
+            }
+            return splitHeld(t, held);
+        }
+        if (seg) return [];      // this voice is empty here; MuseScore fills it with rests
+        if (t.voice === 0) throw new Error("Internal: nothing of voice 1 at tick " + t.tick + " on staff " + t.staff);
+        var from = gapStart(t);
+        if (from < t.tick) {
+            writeEvents({ tick: from, staff: t.staff, voice: t.voice },
+                        [{ kind: "rest", rest: true, pitches: [], spell: {}, ticks: t.tick - from, tie: [], marks: {} }], false);
+        }
+        return [];
+    }
+
+    // Checks that [t.tick, endTick) of the target voice can be overwritten
+    // (no tuplet in it). Returns warnings about what the overwrite changes nearby.
     function checkWriteTarget(t, endTick) {
         var where = "staff " + t.staff + " voice " + t.voice;
         var warnings = [];
-        var c = makeCursor(t);
-        requireSegment(c, t);
-        if (!c.element) {
-            // Nothing of this voice starts here: fine if the voice is empty
-            // here (voices 2-4), not if one of its notes/rests still sounds.
-            var p = makeCursor(t);
-            if (p.prev() && p.element && p.tick + p.element.actualDuration.ticks > t.tick) {
-                throw new Error("Tick " + t.tick + " is inside a note/rest of " + where + " that starts at tick " + p.tick +
-                                ". Start at a note/rest boundary (splitting held notes isn't supported yet).");
-            }
-        }
         var w = makeCursor(t);
+        requireSegment(w, t);
         if (!w.element) w.next();
         var firstChecked = false;
         while (w.segment && w.tick < endTick) {
             var el = w.element;
             if (el.tuplet) {
                 throw new Error("There is a tuplet at tick " + w.tick + " in " + where +
-                                "; writing over tuplets isn't supported yet (fill tuplets with add_note)");
+                                "; writing over tuplets isn't supported yet (fill tuplets with add_note, or clear_range first)");
             }
             if (!firstChecked && w.tick === t.tick && el.type === Element.CHORD && hasTie(el, true)) {
                 warnings.push("The tie into the overwritten note at tick " + t.tick + " was removed");
@@ -1396,7 +1746,7 @@ MuseScore {
             firstChecked = true;
             var end = w.tick + el.actualDuration.ticks;
             if (end > endTick && el.type === Element.CHORD) {
-                warnings.push("The note/chord at tick " + w.tick + " lasted until tick " + end + "; after tick " + endTick + " it is now a rest");
+                warnings.push("The note/chord at tick " + w.tick + " lasted until tick " + end + "; after tick " + endTick + " it is now a rest (not re-struck)");
             } else if (end === endTick && el.type === Element.CHORD && hasTie(el, false)) {
                 warnings.push("The tie from the overwritten note at tick " + w.tick + " to tick " + endTick + " was removed");
             }
@@ -1406,7 +1756,7 @@ MuseScore {
     }
 
     // Throws unless `el` (read back at `tick`) is exactly the requested piece.
-    function checkWritten(el, ev, ticks, tick, t, inTuplet) {
+    function checkWritten(el, ev, ticks, tick, t, inTuplet, actual) {
         var want = (ev.rest ? "rest" : "chord [" + ev.pitches.join(", ") + "]") + " of " + ticksText(ticks);
         var got;
         if (!el) {
@@ -1415,7 +1765,7 @@ MuseScore {
             got = (el.type === Element.CHORD ? "chord [" + chordPitches(el).join(", ") + "]" : el.type === Element.REST ? "rest" : el.name) +
                   " of " + ticksText(el.duration.ticks) + (el.tuplet ? " in a tuplet" : "");
             var ok = el.type === (ev.rest ? Element.REST : Element.CHORD) && el.duration.ticks === ticks &&
-                     (inTuplet ? !!el.tuplet : !el.tuplet && el.actualDuration.ticks === ticks);
+                     (inTuplet ? !!el.tuplet : !el.tuplet) && el.actualDuration.ticks === (isSet(actual) ? actual : ticks);
             if (ok && !ev.rest) ok = chordPitches(el).join(",") === ev.pitches.slice().sort(function(a, b) { return a - b; }).join(",");
             if (ok) return;
         }
@@ -1448,6 +1798,91 @@ MuseScore {
         return el.name + ":" + el.duration.ticks + ":" + (el.type === Element.CHORD ? chordPitches(el).join(".") : "");
     }
 
+    // Spells the notes of the chord at `tick` as named (pitch -> tpc). The
+    // transposing (written) spelling moves along with the concert one.
+    function applySpelling(track, tick, spell) {
+        var el = elementAt(track, tick);
+        if (!el || el.type !== Element.CHORD) return;
+        var notes = el.notes;
+        for (var i = 0; i < notes.length; i++) {
+            var want = spell[notes[i].pitch];
+            if (want === undefined || notes[i].tpc1 === want) continue;
+            var shift = notes[i].tpc2 - notes[i].tpc1;
+            var tpc2 = want + shift;
+            while (tpc2 > 33) tpc2 -= 12;
+            while (tpc2 < -1) tpc2 += 12;
+            notes[i].tpc1 = want;
+            notes[i].tpc2 = tpc2;
+        }
+    }
+
+    // Markings hang on a chord/rest segment. If none starts at t, a rest of
+    // voice 0 held across t is split there (a note is not: that would
+    // change the music). Inside a command.
+    function ensureSegment(t) {
+        if (t.tick < scoreEndTick() && curScore.findSegmentAtTick(Segment.ChordRest, fractionFromTicks(t.tick))) return;
+        var held = t.tick < scoreEndTick() ? heldAt(t.staff, 0, t.tick) : null;
+        if (held && held.el.type === Element.REST && !held.el.tuplet) {
+            splitHeld({ tick: t.tick, staff: t.staff, voice: 0 }, held);
+            return;
+        }
+        throw new Error("No note or rest starts at tick " + t.tick + " on staff " + t.staff +
+                        (held ? " (the note from tick " + held.tick + " is still sounding there)" : "") +
+                        ". Put it where a note or rest starts.");
+    }
+
+    // Adds a dynamic under the chord/rest at t (replacing one there).
+    function putDynamic(t, name) {
+        ensureSegment(t);
+        var c = makeCursor(t);
+        requireSegment(c, t);
+        var old = findAnnotation(c.segment, Element.DYNAMIC, t.staff * 4 + t.voice);
+        if (old) removeElement(old);
+        var dyn = newElement(Element.DYNAMIC);
+        dyn.text = dynamicSymbols(name);
+        dyn.dynamicType = dynamicTypeValue(name);
+        c.add(dyn);
+    }
+
+    // Adds a text-like element (expression/staff/system text, chord symbol) at t.
+    function putText(t, elementType, text) {
+        ensureSegment(t);
+        var c = makeCursor(t);
+        requireSegment(c, t);
+        var el = newElement(elementType);
+        el.text = text;
+        c.add(el);
+    }
+
+    function putArticulations(t, names) {
+        var c = makeCursor(t);
+        requireSegment(c, t);
+        for (var i = 0; i < names.length; i++) {
+            if (names[i] === "fermata") {
+                if (!findAnnotation(c.segment, Element.FERMATA, t.staff * 4 + t.voice)) c.add(newElement(Element.FERMATA));
+                continue;
+            }
+            var art = newElement(Element.ARTICULATION);
+            art.symbol = SymId[articulationSymbols[names[i]]];
+            c.add(art);
+        }
+    }
+
+    function putLyric(t, text, syllabic, verse) {
+        var c = makeCursor(t);
+        requireSegment(c, t);
+        var el = c.element;
+        var existing = el.lyrics;
+        for (var k = existing.length - 1; k >= 0; k--) {
+            if (existing[k].verse === verse) removeElement(existing[k]);
+        }
+        var lyr = newElement(Element.LYRICS);
+        lyr.text = text;
+        lyr.syllabic = syllabic;
+        lyr.verse = verse;
+        c.add(lyr);
+    }
+
     // Writes parsed events one after another from t (staff t.staff, voice
     // t.voice). allowTuplet: a single event may fill a note of an existing
     // tuplet (addNote/addRest). Returns what was written.
@@ -1457,75 +1892,128 @@ MuseScore {
         for (var i = 0; i < events.length; i++) total += events[i].ticks;
         var first = t.tick < scoreEndTick() ? makeCursor(t) : null;
         if (first && first.segment && first.element && first.element.tuplet) {
-            if (!allowTuplet || events.length !== 1) {
+            if (!allowTuplet || events.length !== 1 || events[0].kind === "tuplet") {
                 throw new Error("Tick " + t.tick + " is inside a tuplet; write_voice can't write into tuplets yet (fill them with add_note)");
             }
             return writeInTuplet(t, events[0]);
         }
 
         ensureRoom(t.tick, total);
+        var warnings = prepareStart(t);
         var endTick = t.tick + total;
-        var warnings = checkWriteTarget(t, endTick);
+        warnings = warnings.concat(checkWriteTarget(t, endTick));
         var bars = barsCovering(t.tick, endTick);
 
+        // Plan: each event becomes units: the pieces of a split note, or the
+        // notes of a tuplet.
+        var units = [];
         var splits = [];
         var pos = t.tick;
         for (i = 0; i < events.length; i++) {
-            events[i].pieces = planPieces(pos, events[i].ticks, bars);
-            if (events[i].pieces.length > 1) {
-                splits.push({ event: i, duration: ticksText(events[i].ticks),
-                              writtenAs: events[i].pieces.map(function(piece) { return ticksText(piece.ticks); }) });
+            var ev = events[i];
+            if (ev.kind === "tuplet") {
+                var bar = null;
+                for (var b = 0; b < bars.length; b++) {
+                    if (bars[b].startTick <= pos && pos < bars[b].endTick) bar = bars[b];
+                }
+                if (!bar || pos + ev.ticks > bar.endTick) {
+                    throw new Error("The " + ev.ratio.actual + ":" + ev.ratio.normal + " tuplet at tick " + pos + " would cross a barline");
+                }
+                var p = pos;
+                for (var k = 0; k < ev.inner.length; k++) {
+                    var inner = ev.inner[k];
+                    inner.units = [{ ev: inner, tick: p, ticks: inner.actual, nominal: inner.ticks, tuplet: ev, firstOfTuplet: k === 0 }];
+                    units.push(inner.units[0]);
+                    p += inner.actual;
+                }
+            } else {
+                var pieces = planPieces(pos, ev.ticks, bars);
+                if (pieces.length > 1) {
+                    splits.push({ event: i, duration: ticksText(ev.ticks),
+                                  writtenAs: pieces.map(function(piece) { return ticksText(piece.ticks); }) });
+                }
+                ev.units = [];
+                for (var q = 0; q < pieces.length; q++) {
+                    var u = { ev: ev, tick: pieces[q].tick, ticks: pieces[q].ticks, nominal: pieces[q].ticks, tuplet: null };
+                    ev.units.push(u);
+                    units.push(u);
+                }
             }
-            pos += events[i].ticks;
+            pos += ev.ticks;
         }
 
         // Write through one cursor: after each piece MuseScore moves it to the
         // next position, which must be where the next piece starts.
         var c = makeCursor(t);
-        var written = 0;
-        for (i = 0; i < events.length; i++) {
-            for (var k = 0; k < events[i].pieces.length; k++) {
-                var piece = events[i].pieces[k];
-                if (!c.segment || c.tick !== piece.tick) {
-                    throw new Error("MuseScore moved the write position to tick " + (c.segment ? c.tick : "none") + " instead of " +
-                                    piece.tick + " (staff " + t.staff + " voice " + t.voice + "). Nothing was written.");
-                }
-                writePiece(c, events[i], piece.ticks);
-                written++;
+        for (i = 0; i < units.length; i++) {
+            u = units[i];
+            if (!c.segment || c.tick !== u.tick) {
+                throw new Error("MuseScore moved the write position to tick " + (c.segment ? c.tick : "none") + " instead of " +
+                                u.tick + " (staff " + t.staff + " voice " + t.voice + "). Nothing was written.");
             }
+            if (u.firstOfTuplet) {
+                c.addTuplet(fraction(u.tuplet.ratio.actual, u.tuplet.ratio.normal), fractionOfTicks(u.tuplet.ticks));
+                if (!c.segment || c.tick !== u.tick) throw new Error("MuseScore did not create the tuplet at tick " + u.tick + ". Nothing was written.");
+            }
+            writePiece(c, u.ev, u.nominal);
         }
 
         // Read everything back once: MuseScore must not have changed a duration.
-        for (i = 0; i < events.length; i++) {
-            for (k = 0; k < events[i].pieces.length; k++) {
-                piece = events[i].pieces[k];
-                checkWritten(elementAt(track, piece.tick), events[i], piece.ticks, piece.tick, t, false);
+        for (i = 0; i < units.length; i++) {
+            u = units[i];
+            checkWritten(elementAt(track, u.tick), u.ev, u.nominal, u.tick, t, !!u.tuplet, u.ticks);
+        }
+
+        // Spelling, then markings on the first piece of each note/rest.
+        var flat = flattenEvents(events);
+        var inWord = false;
+        for (i = 0; i < flat.length; i++) {
+            ev = flat[i];
+            var at = { tick: ev.units[0].tick, staff: t.staff, voice: t.voice };
+            if (Object.keys(ev.spell).length) {
+                for (q = 0; q < ev.units.length; q++) applySpelling(track, ev.units[q].tick, ev.spell);
+            }
+            var marks = ev.marks;
+            if (marks.dynamic) putDynamic(at, marks.dynamic);
+            if (marks.articulations) putArticulations(at, marks.articulations);
+            if (marks.text) putText(at, Element.EXPRESSION, marks.text);
+            if (marks.chord) putText(at, Element.HARMONY, marks.chord);
+            if (marks.lyric) {
+                var raw = marks.lyric;
+                if (raw !== "_") {
+                    var cont = raw.length > 1 && raw.charAt(raw.length - 1) === "-";
+                    var text = cont ? raw.substring(0, raw.length - 1) : raw;
+                    putLyric(at, text, inWord ? (cont ? Lyrics.MIDDLE : Lyrics.END) : (cont ? Lyrics.BEGIN : Lyrics.SINGLE), 0);
+                    inWord = cont;
+                }
             }
         }
 
-        // Ties between the pieces of a split note, and where an event asks for one.
+        // Ties between the pieces of a split note, and where a note asks for one.
         var ties = 0;
-        for (i = 0; i < events.length; i++) {
-            var ev = events[i];
-            for (k = 0; k + 1 < ev.pieces.length && !ev.rest; k++) {
-                for (var p = 0; p < ev.pitches.length; p++) {
-                    queueTie(t, ev.pieces[k].tick, ev.pitches[p], ev.pieces[k + 1].tick);
+        for (i = 0; i < flat.length; i++) {
+            ev = flat[i];
+            if (ev.rest) continue;
+            for (q = 0; q + 1 < ev.units.length; q++) {
+                for (var n = 0; n < ev.pitches.length; n++) {
+                    queueTie(t, ev.units[q].tick, ev.pitches[n], ev.units[q + 1].tick);
                     ties++;
                 }
             }
-            var last = ev.pieces[ev.pieces.length - 1];
-            for (p = 0; p < ev.tie.length; p++) {
-                queueTie(t, last.tick, ev.tie[p], last.tick + last.ticks);
+            var last = ev.units[ev.units.length - 1];
+            for (n = 0; n < ev.tie.length; n++) {
+                queueTie(t, last.tick, ev.tie[n], last.tick + last.ticks);
                 ties++;
             }
         }
 
-        var lastEvent = events[events.length - 1];
-        var lastPiece = lastEvent.pieces[lastEvent.pieces.length - 1];
-        commitProbe = function() { return contentSignature(track, lastPiece.tick); };
+        touch(t.tick, endTick);
+        var lastUnit = units[units.length - 1];
+        commitProbe = function() { return contentSignature(track, lastUnit.tick); };
+        var lastEvent = flat[flat.length - 1];
         return {
-            startTick: t.tick, endTick: endTick, written: written, ties: ties, splits: splits, warnings: warnings,
-            lastChord: lastEvent.rest ? null : { tick: lastEvent.pieces[0].tick, staff: t.staff, voice: t.voice, pieces: lastEvent.pieces.length }
+            startTick: t.tick, endTick: endTick, written: units.length, ties: ties, splits: splits, warnings: warnings,
+            lastChord: lastEvent.rest || lastUnit.tuplet ? null : { tick: lastEvent.units[0].tick, staff: t.staff, voice: t.voice, pieces: lastEvent.units.length }
         };
     }
 
@@ -1539,9 +2027,11 @@ MuseScore {
         var track = t.staff * 4 + t.voice;
         writePiece(makeCursor(t), ev, ev.ticks);
         var el = elementAt(track, t.tick);
-        checkWritten(el, ev, ev.ticks, t.tick, t, true);
+        checkWritten(el, ev, ev.ticks, t.tick, t, true, el ? el.actualDuration.ticks : null);
         var endTick = t.tick + el.actualDuration.ticks;
+        if (Object.keys(ev.spell).length) applySpelling(track, t.tick, ev.spell);
         for (var p = 0; p < ev.tie.length; p++) queueTie(t, t.tick, ev.tie[p], endTick);
+        touch(t.tick, endTick);
         commitProbe = function() { return contentSignature(track, t.tick); };
         return { startTick: t.tick, endTick: endTick, written: 1, ties: ev.tie.length, splits: [], warnings: [],
                  lastChord: ev.rest ? null : { tick: t.tick, staff: t.staff, voice: t.voice, pieces: 1 } };
@@ -1565,10 +2055,10 @@ MuseScore {
     // ========================================
 
     // Writes a whole passage in one command (one undo step): notes, chords,
-    // rests and ties, one after another from the start position.
+    // rests, tuplets, ties and markings, one after another from the start.
     function writeVoice(params) {
         if (!curScore) return { error: "No score open" };
-        var events = parseVoiceEvents(params.events);
+        var events = parseVoiceEvents(params.events, false);
 
         return mutate(function() {
             var t = resolveTarget(params);
@@ -1598,24 +2088,32 @@ MuseScore {
         if (!curScore) return { error: "No score open" };
         var validation = validateParams(params, ["pitch"]);
         if (!validation.valid) return validation;
-        if (!(isInt(params.pitch) && params.pitch >= 0 && params.pitch <= 127)) return { error: "Pitch must be a MIDI value 0-127" };
+        var spell = {};
+        var pitch;
+        if (typeof params.pitch === "string") {
+            pitch = checkPitchList([params.pitch], "pitch", spell)[0];
+        } else {
+            if (!(isInt(params.pitch) && params.pitch >= 0 && params.pitch <= 127)) return { error: "Pitch must be a MIDI value 0-127 or a note name like C4" };
+            pitch = params.pitch;
+        }
         var advance = boolParam(params, "advanceCursorAfterAction", true);
         var tie = boolParam(params, "tie", false);
-        if (boolParam(params, "addToChord", false)) return addPitchToChord(params, tie);
+        if (boolParam(params, "addToChord", false)) return addPitchToChord(params, pitch, spell, tie);
         if (!isSet(params.duration)) return { error: "Missing required parameters: duration" };
-        var ev = { rest: false, pitches: [params.pitch], ticks: parseDuration(params.duration, "duration"), tie: tie ? [params.pitch] : [] };
+        var ev = { kind: "note", rest: false, pitches: [pitch], spell: spell, ticks: parseDuration(params.duration, "duration"),
+                   tie: tie ? [pitch] : [], marks: {} };
 
         return mutate(function() {
             var t = resolveTarget(params);
             var info = writeEvents(t, [ev], true);
             cursorState = { tick: advance ? info.endTick : t.tick, staff: t.staff, voice: t.voice, lastChord: info.lastChord };
-            return writeResult("Note " + params.pitch + " added at tick " + t.tick + " on staff " + t.staff + " voice " + t.voice +
+            return writeResult("Note " + pitch + " added at tick " + t.tick + " on staff " + t.staff + " voice " + t.voice +
                                (tie ? ", tied to the next note" : ""), info);
         });
     }
 
     // Adds a pitch to the chord just written (or the chord at tick/measure).
-    function addPitchToChord(params, tie) {
+    function addPitchToChord(params, pitch, spell, tie) {
         var want = isSet(params.duration) ? parseDuration(params.duration, "duration") : null;
         return mutate(function() {
             var t = resolveTarget(params);
@@ -1638,14 +2136,18 @@ MuseScore {
                                 "; omit duration with add_to_chord (the pitch takes the chord's duration)");
             }
             var note = newElement(Element.NOTE);
-            note.pitch = params.pitch;
+            note.pitch = pitch;
             chord.add(note);
-            if (tie) queueTie(t, chordTick, params.pitch, chordTick + chord.actualDuration.ticks);
+            var track = t.staff * 4 + t.voice;
+            if (Object.keys(spell).length) applySpelling(track, chordTick, spell);
+            var end = chordTick + chord.actualDuration.ticks;
+            if (tie) queueTie(t, chordTick, pitch, end);
+            touch(chordTick, end);
             // The write position doesn't move; only staff/voice may change.
             cursorState = { tick: isSet(params.tick) || isSet(params.measure) ? t.tick : cursorState.tick,
                             staff: t.staff, voice: t.voice,
                             lastChord: { tick: chordTick, staff: t.staff, voice: t.voice, pieces: 1 } };
-            return { message: "Added pitch " + params.pitch + " to chord at tick " + chordTick + (tie ? ", tied to the next note" : "") };
+            return { message: "Added pitch " + pitch + " to chord at tick " + chordTick + (tie ? ", tied to the next note" : "") };
         });
     }
 
@@ -1654,7 +2156,7 @@ MuseScore {
         var validation = validateParams(params, ["duration"]);
         if (!validation.valid) return validation;
         var advance = boolParam(params, "advanceCursorAfterAction", true);
-        var ev = { rest: true, pitches: [], ticks: parseDuration(params.duration, "duration"), tie: [] };
+        var ev = { kind: "rest", rest: true, pitches: [], spell: {}, ticks: parseDuration(params.duration, "duration"), tie: [], marks: {} };
 
         return mutate(function() {
             var t = resolveTarget(params);
@@ -1748,6 +2250,555 @@ MuseScore {
         }
         sel.clear();
         return null;
+    }
+
+    // ========================================
+    // RANGE OPERATIONS: transpose, clear, replace
+    // Each is one command (one undo step) and can be part of an atomic batch.
+    // ========================================
+
+    // [startTick, endTick) from startMeasure/endMeasure (whole bars, both
+    // inclusive) or from startTick/endTick.
+    function tickRange(params) {
+        if (isSet(params.startTick) || isSet(params.endTick)) {
+            if (isSet(params.startMeasure) || isSet(params.endMeasure)) {
+                throw new Error("Give the range as bars (startMeasure/endMeasure) or as ticks (startTick/endTick), not both");
+            }
+            var end = scoreEndTick();
+            var st = checkInt(params.startTick, "startTick", 0, end - 1);
+            var et = checkInt(params.endTick, "endTick", st + 1, end);
+            return { startTick: st, endTick: et, label: "ticks " + st + "-" + et };
+        }
+        if (!isSet(params.startMeasure)) throw new Error("Give the range: startMeasure/endMeasure (bars) or startTick/endTick");
+        var r = barRange(params);
+        return { startTick: r.startTick, endTick: r.endTick, label: "bars " + r.first.number + "-" + r.last.number, bars: r };
+    }
+
+    function indexList(value, label, max) {
+        if (!Array.isArray(value) || !value.length) throw new Error(label + " must be a non-empty list");
+        var out = [];
+        for (var i = 0; i < value.length; i++) {
+            checkInt(value[i], label + " entry", 0, max);
+            if (out.indexOf(value[i]) >= 0) throw new Error(label + " lists " + value[i] + " twice");
+            out.push(value[i]);
+        }
+        return out.sort(function(a, b) { return a - b; });
+    }
+
+    // staves: a list of staff indices (default: all staves)
+    function staffList(params) {
+        if (isSet(params.staves)) return indexList(params.staves, "staves", curScore.nstaves - 1);
+        var all = [];
+        for (var s = 0; s < curScore.nstaves; s++) all.push(s);
+        return all;
+    }
+
+    // voices: a list of voices 0-3 (default: all)
+    function voiceList(params) {
+        return isSet(params.voices) ? indexList(params.voices, "voices", 3) : [0, 1, 2, 3];
+    }
+
+    // The chords/rests of one voice that start in [startTick, endTick): [{tick, el}]
+    function voiceElements(staff, voice, startTick, endTick) {
+        var out = [];
+        var m = curScore.tick2measure(fractionFromTicks(startTick));
+        if (!m) return out;
+        var c = makeCursor({ tick: m.tick.ticks, staff: staff, voice: voice });
+        if (!c.segment) return out;
+        if (!c.element) c.next();
+        while (c.segment && c.tick < endTick) {
+            if (c.tick >= startTick) out.push({ tick: c.tick, el: c.element });
+            c.next();
+        }
+        return out;
+    }
+
+    // tpc change for a transposition by n semitones (C -> Db for +1, C -> D for +2, ...)
+    property var tpcShiftBySemitone: [0, -5, 2, -3, 4, -1, 6, 1, -4, 3, -2, 5]
+
+    // Transposes every note in the range (on the given staves and voices) by
+    // `semitones`. Notes tied into or out of the range move with it.
+    // Key signatures and chord symbols are left as they are.
+    function transposeRange(params) {
+        var validation = validateParams(params, ["semitones"]);
+        if (!validation.valid) return validation;
+        if (!curScore) return { error: "No score open" };
+        var semis = checkInt(params.semitones, "semitones", -48, 48);
+        if (semis === 0) return { error: "semitones must not be 0" };
+        var range = tickRange(params);
+        var staves = staffList(params);
+        var voices = voiceList(params);
+
+        return mutate(function() {
+            var notes = [];
+            var seen = {};
+            var extendedTo = [];
+            function take(n, inRange) {
+                var key = n.track + ":" + elementTick(n) + ":" + n.pitch;
+                if (seen[key]) return false;
+                seen[key] = true;
+                notes.push(n);
+                if (!inRange) extendedTo.push(elementTick(n));
+                return true;
+            }
+            for (var s = 0; s < staves.length; s++) {
+                for (var v = 0; v < voices.length; v++) {
+                    var items = voiceElements(staves[s], voices[v], range.startTick, range.endTick);
+                    for (var i = 0; i < items.length; i++) {
+                        if (items[i].el.type !== Element.CHORD) continue;
+                        var chordNotes = items[i].el.notes;
+                        for (var k = 0; k < chordNotes.length; k++) {
+                            var n = chordNotes[k];
+                            take(n, true);
+                            // follow ties out of the range, both ways
+                            var b = n;
+                            while (b.tieBack && b.tieBack.startNote) { b = b.tieBack.startNote; if (!take(b, elementTick(b) >= range.startTick)) break; }
+                            var f = n;
+                            while (f.tieForward && f.tieForward.endNote) { f = f.tieForward.endNote; if (!take(f, elementTick(f) < range.endTick)) break; }
+                        }
+                    }
+                }
+            }
+            for (i = 0; i < notes.length; i++) {
+                var np = notes[i].pitch + semis;
+                if (np < 0 || np > 127) throw new Error("Transposing pitch " + notes[i].pitch + " at tick " + elementTick(notes[i]) + " by " + semis + " leaves MIDI 0-127. Nothing was changed.");
+            }
+            var minTick = range.startTick, maxTick = range.endTick;
+            for (i = 0; i < notes.length; i++) {
+                n = notes[i];
+                var tick = elementTick(n);
+                minTick = Math.min(minTick, tick);
+                maxTick = Math.max(maxTick, tick);
+                var old1 = n.tpc1, old2 = n.tpc2;
+                var new1 = old1 + tpcShiftBySemitone[((semis % 12) + 12) % 12];
+                while (new1 > 26) new1 -= 12;
+                while (new1 < 6) new1 += 12;
+                var new2 = old2 + (new1 - old1);
+                while (new2 > 33) new2 -= 12;
+                while (new2 < -1) new2 += 12;
+                n.pitch = n.pitch + semis;
+                n.tpc1 = new1;
+                n.tpc2 = new2;
+            }
+            touch(minTick, maxTick);
+            var warnings = [];
+            if (extendedTo.length) warnings.push("Tied notes outside the range moved too (ticks " + extendedTo.sort(function(a, b) { return a - b; }).join(", ") + ")");
+            var symbols = countAnnotations(range.startTick, range.endTick, staves, [Element.HARMONY]);
+            if (symbols) warnings.push(symbols + " chord symbol(s) in the range were not transposed");
+            var r = { message: "Transposed " + notes.length + " note(s) in " + range.label + " by " + semis + " semitone(s)", notes: notes.length };
+            if (warnings.length) r.warnings = warnings;
+            return r;
+        });
+    }
+
+    // Staff-bound markings (dynamics, texts, chord symbols, fermatas) of the
+    // given types on the staves in [startTick, endTick).
+    function staffAnnotations(startTick, endTick, staves, types) {
+        var out = [];
+        var m = curScore.tick2measure(fractionFromTicks(startTick));
+        while (m && m.tick.ticks < endTick) {
+            var seg = m.firstSegment;
+            while (seg) {
+                if (seg.tick >= startTick && seg.tick < endTick) {
+                    var anns = seg.annotations;
+                    for (var a = 0; a < anns.length; a++) {
+                        var ann = anns[a];
+                        if (types.indexOf(ann.type) >= 0 && ann.track >= 0 && staves.indexOf(Math.floor(ann.track / 4)) >= 0) out.push(ann);
+                    }
+                }
+                seg = seg.nextInMeasure;
+            }
+            m = m.nextMeasure;
+        }
+        return out;
+    }
+
+    function countAnnotations(startTick, endTick, staves, types) {
+        return staffAnnotations(startTick, endTick, staves, types).length;
+    }
+
+    // Clears one voice in [startTick, endTick): a note held across the start
+    // keeps its part before it; everything starting inside is removed (voice
+    // 1 becomes rests, voices 2-4 become empty). A note that starts inside and
+    // lasts past the end is removed entirely: its remainder becomes a rest.
+    function clearVoice(staff, voice, startTick, endTick, warnings) {
+        var track = staff * 4 + voice;
+        var held = heldAt(staff, voice, startTick);
+        if (held) {
+            if (held.el.tuplet) {
+                throw new Error("The range starts inside a tuplet (staff " + staff + " voice " + voice + ", tick " + held.tick + "); start it at the tuplet");
+            }
+            warnings.push.apply(warnings, splitHeld({ tick: startTick, staff: staff, voice: voice }, held));
+        }
+        var items = voiceElements(staff, voice, startTick, endTick);
+        var removed = 0;
+        for (var i = 0; i < items.length; i++) {
+            var tick = items[i].tick;
+            var el = elementAt(track, tick);
+            if (!el) continue;
+            if (el.type === Element.CHORD) {
+                var end = tick + el.actualDuration.ticks;
+                if (end > endTick) {
+                    warnings.push("The note/chord at tick " + tick + " (staff " + staff + " voice " + voice + ") lasted until tick " + end +
+                                  "; it was removed entirely, so after tick " + endTick + " there is a rest (not a re-struck note)");
+                }
+                removeElement(el);          // becomes a rest of the same length
+                removed++;
+                el = voice > 0 ? elementAt(track, tick) : null;
+            }
+            if (voice > 0 && el && el.type === Element.REST && el.gap !== true) removeElement(el);   // becomes a gap
+        }
+        return removed;
+    }
+
+    // Voice 1 of whole bars inside the range: one rest per bar instead of
+    // the rests the removed notes left behind.
+    function restWholeBars(staff, startTick, endTick) {
+        var bars = barsCovering(startTick, endTick);
+        for (var b = 0; b < bars.length; b++) {
+            if (bars[b].startTick < startTick || bars[b].endTick > endTick) continue;
+            var items = voiceElements(staff, 0, bars[b].startTick, bars[b].endTick);
+            if (items.length <= 1) continue;
+            writeEvents({ tick: bars[b].startTick, staff: staff, voice: 0 },
+                        [{ kind: "rest", rest: true, pitches: [], spell: {}, ticks: bars[b].endTick - bars[b].startTick, tie: [], marks: {}, label: "rest" }], false);
+        }
+    }
+
+    property var clearedMarkingTypes: [Element.DYNAMIC, Element.STAFF_TEXT, Element.EXPRESSION, Element.HARMONY, Element.FERMATA]
+
+    function clearRange(params) {
+        if (!curScore) return { error: "No score open" };
+        var range = tickRange(params);
+        var staves = staffList(params);
+        var voices = voiceList(params);
+        var markings = boolParam(params, "markings", true);
+
+        return mutate(function() {
+            var warnings = [];
+            var removed = 0;
+            for (var s = 0; s < staves.length; s++) {
+                for (var v = 0; v < voices.length; v++) removed += clearVoice(staves[s], voices[v], range.startTick, range.endTick, warnings);
+                if (voices.indexOf(0) >= 0) restWholeBars(staves[s], range.startTick, range.endTick);
+            }
+            var marks = 0;
+            if (markings) {
+                var anns = staffAnnotations(range.startTick, range.endTick, staves, clearedMarkingTypes);
+                for (var a = 0; a < anns.length; a++) removeElement(anns[a]);
+                marks = anns.length;
+            }
+            touch(range.startTick, range.endTick);
+            var r = { message: "Cleared " + range.label + " on staves " + staves.join(", ") + " (voices " + voices.join(", ") +
+                               "): " + removed + " note(s)/chord(s)" + (markings ? ", " + marks + " marking(s)" : "") };
+            if (warnings.length) r.warnings = warnings;
+            return r;
+        });
+    }
+
+    // Replaces bars startMeasure..endMeasure with new music, in one command:
+    // parts [{staff, voice, events}] each fill the whole section; the other
+    // voices of those staves are cleared (unless clearOtherVoices is false).
+    function replaceSection(params) {
+        if (!curScore) return { error: "No score open" };
+        if (!isSet(params.startMeasure)) return { error: "Missing required parameters: startMeasure" };
+        var range = barRange(params);
+        var length = range.endTick - range.startTick;
+        if (!Array.isArray(params.parts) || !params.parts.length) return { error: "parts must be a non-empty list of {staff, voice, events}" };
+        var clearOthers = boolParam(params, "clearOtherVoices", true);
+        var parts = [];
+        var used = {};
+        for (var i = 0; i < params.parts.length; i++) {
+            var part = params.parts[i];
+            var where = "Part " + i;
+            if (!isPlainObject(part)) throw new Error(where + " must be an object {staff, voice, events}");
+            checkKeys(part, ["staff", "voice", "events"], where);
+            var staff = checkInt(part.staff, where + " staff", 0, curScore.nstaves - 1);
+            var voice = isSet(part.voice) ? checkInt(part.voice, where + " voice", 0, 3) : 0;
+            if (used[staff + ":" + voice]) throw new Error(where + ": staff " + staff + " voice " + voice + " is given twice");
+            used[staff + ":" + voice] = true;
+            var events = parseVoiceEvents(part.events, false);
+            var total = 0;
+            for (var e = 0; e < events.length; e++) total += events[e].ticks;
+            if (total !== length) {
+                throw new Error(where + " (staff " + staff + " voice " + voice + ") lasts " + ticksText(total) + ", but bars " + range.first.number + "-" +
+                                range.last.number + " last " + ticksText(length) + " (fill it exactly; use rests)");
+            }
+            parts.push({ staff: staff, voice: voice, events: events });
+        }
+        // voice 1 first: the other voices need its chords/rests to hang on
+        parts.sort(function(a, b) { return a.voice - b.voice || a.staff - b.staff; });
+
+        return mutate(function() {
+            var warnings = [];
+            var staves = [];
+            for (var p = 0; p < parts.length; p++) if (staves.indexOf(parts[p].staff) < 0) staves.push(parts[p].staff);
+            if (clearOthers) {
+                for (var s = 0; s < staves.length; s++) {
+                    for (var v = 0; v < 4; v++) {
+                        if (used[staves[s] + ":" + v]) continue;
+                        clearVoice(staves[s], v, range.startTick, range.endTick, warnings);
+                        if (v === 0) restWholeBars(staves[s], range.startTick, range.endTick);
+                    }
+                }
+            }
+            var written = 0, ties = 0;
+            for (p = 0; p < parts.length; p++) {
+                var info = writeEvents({ tick: range.startTick, staff: parts[p].staff, voice: parts[p].voice }, parts[p].events, false);
+                written += info.written;
+                ties += info.ties;
+                warnings = warnings.concat(info.warnings);
+            }
+            touch(range.startTick, range.endTick);
+            cursorState = { tick: range.endTick, staff: parts[0].staff, voice: parts[0].voice, lastChord: null };
+            var r = { message: "Replaced bars " + range.first.number + "-" + range.last.number + " with " + parts.length + " part(s): " +
+                               written + " notes/rests, " + ties + " tie(s), one undo step", written: written, ties: ties };
+            if (warnings.length) r.warnings = warnings;
+            return r;
+        });
+    }
+
+    // ========================================
+    // TEXT, CHORD SYMBOLS, PEDAL, CLEFS, LAYOUT
+    // ========================================
+
+    property var textKinds: ({ "staff": Element.STAFF_TEXT, "system": Element.SYSTEM_TEXT, "expression": Element.EXPRESSION })
+
+    function addText(params) {
+        var validation = validateParams(params, ["text"]);
+        if (!validation.valid) return validation;
+        if (!curScore) return { error: "No score open" };
+        if (typeof params.text !== "string" || !params.text.length) return { error: "text must be a non-empty string" };
+        var kind = isSet(params.kind) ? params.kind : "staff";
+        if (!hasKey(textKinds, kind)) return { error: "kind must be staff, system or expression" };
+        return mutate(function() {
+            var t = resolveTarget(params);
+            putText(t, textKinds[kind], params.text);
+            touch(t.tick, t.tick);
+            return { message: kind + " text '" + params.text + "' added at tick " + t.tick + " on staff " + t.staff };
+        });
+    }
+
+    function addChordSymbol(params) {
+        var validation = validateParams(params, ["text"]);
+        if (!validation.valid) return validation;
+        if (!curScore) return { error: "No score open" };
+        if (typeof params.text !== "string" || !params.text.length) return { error: "text must be a chord symbol like Cmaj7, F#m7b5, G/B" };
+        return mutate(function() {
+            var t = resolveTarget(params);
+            ensureSegment(t);
+            var c = makeCursor(t);
+            requireSegment(c, t);
+            var old = findAnnotation(c.segment, Element.HARMONY, t.staff * 4);
+            if (old) removeElement(old);
+            putText({ tick: t.tick, staff: t.staff, voice: 0 }, Element.HARMONY, params.text);
+            touch(t.tick, t.tick);
+            return { message: "Chord symbol " + params.text + " at tick " + t.tick + " on staff " + t.staff };
+        });
+    }
+
+    // Pedal marks as symbols (Ped. ... *). MuseScore's plugin API can't add
+    // real pedal lines, so these don't change playback.
+    function addPedalMarks(params) {
+        if (!curScore) return { error: "No score open" };
+        var range = tickRange(params);
+        var staff = isSet(params.staff) ? checkInt(params.staff, "staff", 0, curScore.nstaves - 1) : cursorState.staff;
+        if (range.endTick >= scoreEndTick()) return { error: "The pedal release must be before the end of the score (add a bar, or end it earlier)" };
+        return mutate(function() {
+            putText({ tick: range.startTick, staff: staff, voice: 0 }, Element.STAFF_TEXT, "<sym>keyboardPedalPed</sym>");
+            putText({ tick: range.endTick, staff: staff, voice: 0 }, Element.STAFF_TEXT, "<sym>keyboardPedalUp</sym>");
+            touch(range.startTick, range.endTick);
+            return { message: "Pedal marks (Ped. at tick " + range.startTick + ", release at tick " + range.endTick + ") on staff " + staff +
+                              ". They are symbols only: MuseScore won't sustain on playback (use a pedal line from the palette for that)." };
+        });
+    }
+
+    property var clefTypes: ({
+        "treble": "G", "bass": "F", "alto": "C3", "tenor": "C4", "soprano": "C1", "mezzo-soprano": "C2", "baritone": "F_B",
+        "treble 8vb": "G8_VB", "treble 8va": "G8_VA", "treble 15ma": "G15_MA", "bass 8vb": "F8_VB", "bass 8va": "F_8VA",
+        "percussion": "PERC"
+    })
+
+    function addClef(params) {
+        var validation = validateParams(params, ["type"]);
+        if (!validation.valid) return validation;
+        if (!curScore) return { error: "No score open" };
+        if (!hasKey(clefTypes, params.type)) return { error: "Unknown clef '" + params.type + "' (use " + Object.keys(clefTypes).join(", ") + ")" };
+        return mutate(function() {
+            var t = resolveTarget(params);
+            ensureSegment(t);
+            var c = makeCursor({ tick: t.tick, staff: t.staff, voice: 0 });
+            requireSegment(c, t);
+            var clef = newElement(Element.CLEF);
+            // Set the type before adding: the staff reads it when the clef is added
+            clef.concertClefType = ClefType[clefTypes[params.type]];
+            clef.transposingClefType = ClefType[clefTypes[params.type]];
+            c.add(clef);
+            touch(t.tick, t.tick);
+            return { message: params.type + " clef at tick " + t.tick + " on staff " + t.staff };
+        });
+    }
+
+    property var layoutBreakTypes: ({ "line": "LINE", "page": "PAGE", "section": "SECTION" })
+
+    // A system/page/section break after a bar.
+    function addLayoutBreak(params) {
+        var validation = validateParams(params, ["type", "measure"]);
+        if (!validation.valid) return validation;
+        if (!curScore) return { error: "No score open" };
+        if (!hasKey(layoutBreakTypes, params.type)) return { error: "type must be line, page or section" };
+        var m = measureByNumber(params.measure);
+        return mutate(function() {
+            var els = m.obj.elements;
+            for (var i = 0; i < els.length; i++) {
+                if (els[i].type === Element.LAYOUT_BREAK && els[i].layoutBreakType === LayoutBreak[layoutBreakTypes[params.type]]) {
+                    return { message: "Bar " + m.number + " already has a " + params.type + " break" };
+                }
+            }
+            var lb = newElement(Element.LAYOUT_BREAK);
+            lb.layoutBreakType = LayoutBreak[layoutBreakTypes[params.type]];
+            var c = makeCursor({ tick: m.startTick, staff: 0, voice: 0 });
+            requireSegment(c, { tick: m.startTick, staff: 0 });
+            c.add(lb);
+            touch(m.startTick, m.startTick);
+            return { message: params.type + " break after bar " + m.number };
+        });
+    }
+
+    // Makes every system hold `count` bars (0 removes the locks), with
+    // MuseScore's system locks. EditSystemLocks::addRemoveSystemLocks works
+    // on the selected bars, and only lock=false takes the bar count (it
+    // removes the locks there, then locks every `count` bars), so the whole
+    // score is selected first, outside the command.
+    function setMeasuresPerSystem(params) {
+        var validation = validateParams(params, ["count"]);
+        if (!validation.valid) return validation;
+        if (!curScore) return { error: "No score open" };
+        var count = checkInt(params.count, "count", 0, 64);
+        if (!selectRangeInclusive(0, scoreEndTick(), 0, curScore.nstaves - 1)) return { error: "Could not select the score" };
+        return mutate(function() {
+            curScore.addRemoveSystemLocks(count, false);
+            return { message: count > 0 ? "Systems locked to " + count + " bar(s) each" : "System locks removed" };
+        });
+    }
+
+    // ========================================
+    // SCORE INFO, EXPORT, SAVE, REDO, SELECTION, CHECK
+    // ========================================
+
+    // [TextStyleType name for curScore.addText, Tid name of the text's
+    // subStyle (Tid calls the lyricist style POET), meta tag]
+    property var scoreTextFields: ({
+        "title": ["TITLE", "TITLE", "workTitle"], "subtitle": ["SUBTITLE", "SUBTITLE", "subtitle"],
+        "composer": ["COMPOSER", "COMPOSER", "composer"], "lyricist": ["LYRICIST", "POET", "lyricist"]
+    })
+
+    // The frame (VBox) above the first bar, where the title texts live.
+    function titleFrame() {
+        var m = curScore.firstMeasure;
+        var mb = m ? m.prev : null;
+        while (mb && mb.type !== Element.VBOX) mb = mb.prev;
+        return mb;
+    }
+
+    // Sets title/subtitle/composer/lyricist: the text on the page (replacing
+    // the old one) and the score property. An empty string removes it.
+    function setScoreInfo(params) {
+        if (!curScore) return { error: "No score open" };
+        var keys = Object.keys(params);
+        if (!keys.length) return { error: "Give at least one of title, subtitle, composer, lyricist" };
+        for (var i = 0; i < keys.length; i++) {
+            if (typeof params[keys[i]] !== "string") return { error: keys[i] + " must be a string" };
+        }
+        return mutate(function() {
+            for (var i = 0; i < keys.length; i++) {
+                var field = scoreTextFields[keys[i]];
+                var frame = titleFrame();
+                if (frame) {
+                    var els = frame.elements;
+                    for (var k = els.length - 1; k >= 0; k--) {
+                        if (els[k].subStyle === Tid[field[1]]) removeElement(els[k]);
+                    }
+                }
+                if (params[keys[i]].length) curScore.addText(field[0], params[keys[i]]);
+                curScore.setMetaTag(field[2], params[keys[i]]);
+            }
+            return { message: "Set " + keys.join(", ") };
+        });
+    }
+
+    // Exports the score to a file, e.g. format "pdf", "mid", "musicxml", "mxl", "png", "svg", "mp3", "wav".
+    function exportScore(params) {
+        var validation = validateParams(params, ["path", "format"]);
+        if (!validation.valid) return validation;
+        if (!curScore) return { error: "No score open" };
+        if (typeof params.path !== "string" || !params.path.length) return { error: "path must be a file path" };
+        var format = String(params.format).toLowerCase().replace(/^\./, "");
+        if (!/^[a-z0-9]+$/.test(format)) return { error: "format must be an extension like pdf, mid, musicxml" };
+        var ok = writeScore(curScore, params.path, format);
+        if (!ok) return { error: "MuseScore could not export to " + params.path + " as " + format + " (unsupported format, or the folder doesn't exist)" };
+        var path = params.path.slice(-format.length - 1) === "." + format ? params.path : params.path + "." + format;
+        return { success: true, message: "Exported to " + path, path: path };
+    }
+
+    function saveScore(params) {
+        if (!curScore) return { error: "No score open" };
+        cmd("file-save");
+        return { success: true, message: "Asked MuseScore to save the score (a score that was never saved opens the Save dialog)" };
+    }
+
+    property var redoCursorStack: []
+
+    function redo(params) {
+        if (!curScore) return { error: "No score open" };
+        var steps = isSet(params.steps) ? checkInt(params.steps, "steps", 1, 1000) : 1;
+        for (var i = 0; i < steps; i++) {
+            cmd("action://notation/redo");
+            undoCursorStack.push(copyCursor(cursorState));
+            if (redoCursorStack.length > 0) cursorState = redoCursorStack.pop();
+        }
+        return navResult("Redid " + steps + " step(s)");
+    }
+
+    // What is selected in MuseScore: a range (bars, staves) or single elements.
+    // fromUser: the user selected it (not the plugin showing its cursor).
+    function getSelection(params) {
+        if (!curScore) return { error: "No score open" };
+        var sel = curScore.selection;
+        var measures = listMeasures();
+        function barOf(tick) {
+            var m = measureAtTick(tick);
+            return m ? m.number : null;
+        }
+        if (sel.isRange) {
+            var st = sel.startSegment ? sel.startSegment.tick : 0;
+            var et = sel.endSegment ? sel.endSegment.tick : scoreEndTick();
+            return { success: true, kind: "range", fromUser: selectionFromUser, startTick: st, endTick: et,
+                     startMeasure: barOf(st), endMeasure: barOf(Math.max(st, et - 1)),
+                     startStaff: sel.startStaff, endStaff: sel.endStaff - 1 };
+        }
+        var els = sel.elements;
+        var out = [];
+        for (var i = 0; i < els.length && i < 200; i++) {
+            var el = els[i];
+            var item = { type: el.name, tick: elementTick(el), staff: el.track >= 0 ? Math.floor(el.track / 4) : null, voice: el.track >= 0 ? el.track % 4 : null };
+            if (el.type === Element.NOTE) item.pitch = el.pitch;
+            item.measure = item.tick >= 0 ? barOf(item.tick) : null;
+            out.push(item);
+        }
+        return { success: true, kind: out.length ? "list" : "none", fromUser: selectionFromUser, elements: out, count: els.length };
+    }
+
+    // Bars whose voices don't add up (MuseScore marks them corrupted).
+    function checkScore(params) {
+        if (!curScore) return { error: "No score open" };
+        var measures = listMeasures();
+        var problems = [];
+        for (var i = 0; i < measures.length; i++) {
+            for (var s = 0; s < curScore.nstaves; s++) {
+                if (measures[i].obj.corrupted(s)) problems.push({ measure: measures[i].number, staff: s });
+            }
+        }
+        return { success: true, ok: problems.length === 0, corrupted: problems,
+                 message: problems.length ? problems.length + " corrupted bar/staff combination(s)" : "No corrupted bars" };
     }
 
     // Creates a tuplet filled with rests. By default the cursor stays at its
@@ -1869,14 +2920,8 @@ MuseScore {
 
         return mutate(function() {
             var t = resolveTarget(params);
-            var c = makeCursor(t);
-            requireSegment(c, t);
-            var old = findAnnotation(c.segment, Element.DYNAMIC, t.staff * 4 + t.voice);
-            if (old) removeElement(old);
-            var dyn = newElement(Element.DYNAMIC);
-            dyn.text = dynamicSymbols(name);
-            dyn.dynamicType = type;
-            c.add(dyn);
+            putDynamic(t, name);
+            touch(t.tick, t.tick);
             moveCursorTo(t);
             return { message: "Dynamic " + name + " added at tick " + t.tick + " on staff " + t.staff };
         });
@@ -1886,35 +2931,52 @@ MuseScore {
         if (!curScore) return { error: "No score open" };
         return mutate(function() {
             var t = resolveTarget(params);
+            ensureSegment(t);
             var c = makeCursor(t);
             requireSegment(c, t);
             if (findAnnotation(c.segment, Element.FERMATA, t.staff * 4 + t.voice)) {
                 return { message: "Fermata already present at tick " + t.tick };
             }
             c.add(newElement(Element.FERMATA));
+            touch(t.tick, t.tick);
             moveCursorTo(t);
             return { message: "Fermata added at tick " + t.tick + " on staff " + t.staff };
         });
     }
 
+    // Metronome symbols for a beat unit given in ticks.
+    property var beatUnitSymbols: ({
+        "1920": "<sym>metNoteWhole</sym>", "960": "<sym>metNoteHalfUp</sym>", "480": "<sym>metNoteQuarterUp</sym>",
+        "240": "<sym>metNote8thUp</sym>", "120": "<sym>metNote16thUp</sym>",
+        "2880": "<sym>metNoteWhole</sym><sym>metAugmentationDot</sym>", "1440": "<sym>metNoteHalfUp</sym><sym>metAugmentationDot</sym>",
+        "720": "<sym>metNoteQuarterUp</sym><sym>metAugmentationDot</sym>", "360": "<sym>metNote8thUp</sym><sym>metAugmentationDot</sym>"
+    })
+
     // Tempo marks are system text: placed on the top staff at the target tick.
+    // bpm counts beatUnit notes (default a quarter; "3/8" = dotted quarter).
     function setTempo(params) {
         var validation = validateParams(params, ["bpm"]);
         if (!validation.valid) return validation;
         if (!curScore) return { error: "No score open" };
-        if (!(params.bpm > 0 && params.bpm < 1000)) return { error: "bpm must be between 0 and 1000" };
+        if (!(typeof params.bpm === "number" && params.bpm > 0 && params.bpm < 1000)) return { error: "bpm must be between 0 and 1000" };
+        var unit = isSet(params.beatUnit) ? parseDuration(params.beatUnit, "beatUnit") : 480;
+        if (!beatUnitSymbols[String(unit)]) return { error: "beatUnit must be a plain or dotted note from 1/16 to 3/2, got " + ticksText(unit) };
+        if (isSet(params.text) && typeof params.text !== "string") return { error: "text must be a string" };
 
         return mutate(function() {
             var t = resolveTarget(params);
+            ensureSegment({ tick: t.tick, staff: 0 });
             var c = makeCursor({ tick: t.tick, staff: 0, voice: 0 });
             requireSegment(c, { tick: t.tick, staff: 0 });
             var old = findAnnotation(c.segment, Element.TEMPO_TEXT);
             if (old) removeElement(old);
             var tempo = newElement(Element.TEMPO_TEXT);
-            tempo.text = (params.text ? params.text + " " : "") + "<sym>metNoteQuarterUp</sym> = " + params.bpm;
-            tempo.tempo = params.bpm / 60.0;
+            tempo.text = (params.text ? params.text + " " : "") + beatUnitSymbols[String(unit)] + " = " + params.bpm;
+            tempo.tempo = params.bpm * (unit / 480) / 60.0;     // quarter notes per second
             c.add(tempo);
-            return { message: "Tempo set to " + params.bpm + " BPM at tick " + t.tick };
+            touch(t.tick, t.tick);
+            var quarterBpm = Math.round(params.bpm * unit / 480 * 100) / 100;
+            return { message: "Tempo set to " + params.bpm + " BPM (" + ticksText(unit) + " beats; quarter = " + quarterBpm + ") at tick " + t.tick };
         });
     }
 
@@ -2025,6 +3087,7 @@ MuseScore {
         if (!curScore) return { error: "No score open" };
         return mutate(function() {
             var t = resolveTarget(params);
+            ensureSegment({ tick: t.tick, staff: 0 });
             var c = makeCursor({ tick: t.tick, staff: 0, voice: 0 });
             requireSegment(c, { tick: t.tick, staff: 0 });
             var old = findAnnotation(c.segment, Element.REHEARSAL_MARK);
@@ -2351,8 +3414,10 @@ MuseScore {
             var els = map["staff" + st] || [];
             for (var i = 0; i < els.length; i++) {
                 var e = els[i];
+                // Rests of voices 2-4 may be pasted as visible rests or gaps: ignore them
+                if (e.voice > 0 && e.name === "Rest") continue;
                 var pitches = (e.notes || []).map(function(n) { return n.pitchMidi; }).join(".");
-                out.push(st + ":" + e.voice + ":" + (e.startTick - startTick) + ":" + e.name + ":" + e.durationTicks + ":" + pitches);
+                out.push((st - s0) + ":" + e.voice + ":" + (e.startTick - startTick) + ":" + e.name + ":" + e.durationTicks + ":" + pitches);
             }
         }
         return out.join("|");
@@ -2360,17 +3425,23 @@ MuseScore {
 
     // Copies bars startMeasure..endMeasure to toMeasure. With insert (default)
     // the copy goes into new empty bars inserted before toMeasure (or appended
-    // at the end); otherwise it overwrites the bars there.
+    // at the end); otherwise it overwrites the bars there. toStaff pastes onto
+    // other staves (e.g. a melody from the left hand to the right hand);
+    // transpose then moves the copy by that many semitones.
     function copyMeasures(params) {
         var validation = validateParams(params, ["startMeasure", "toMeasure"]);
         if (!validation.valid) return validation;
         if (!curScore) return { error: "No score open" };
         var src = barRange(params);
         var staves = staffRange(params);
-        var insert = params.insert !== false;
+        var insert = boolParam(params, "insert", true);
         var total = listMeasures().length;
-        if (!(params.toMeasure >= 1 && params.toMeasure <= total + 1)) return { error: "toMeasure must be 1-" + (total + 1) };
+        checkInt(params.toMeasure, "toMeasure", 1, total + 1);
         if (!insert && params.toMeasure + src.bars - 1 > total) return { error: "Not enough bars after bar " + params.toMeasure + " to paste over; use insert" };
+        var toFirst = isSet(params.toStaff) ? checkInt(params.toStaff, "toStaff", 0, curScore.nstaves - 1) : staves.first;
+        var toLast = toFirst + staves.last - staves.first;
+        if (toLast >= curScore.nstaves) return { error: "Copying " + (staves.last - staves.first + 1) + " staves to staff " + toFirst + " needs staves up to " + toLast };
+        var semis = isSet(params.transpose) ? checkInt(params.transpose, "transpose", -48, 48) : 0;
         var srcSig = rangeSignature(src.startTick, src.endTick, staves.first, staves.last);
 
         // 1. Copy the source to MuseScore's clipboard
@@ -2396,20 +3467,32 @@ MuseScore {
         // 3. Paste at the target
         var target = measureByNumber(params.toMeasure);
         var targetEnd = measureByNumber(params.toMeasure + src.bars - 1);
-        if (!selectRangeInclusive(target.startTick, targetEnd.endTick, staves.first, staves.last)) return { error: "Could not select the target bars" };
+        if (!selectRangeInclusive(target.startTick, targetEnd.endTick, toFirst, toLast)) return { error: "Could not select the target bars" };
         var pasted = runSelectionCommand("action://notation/paste", function() {
-            return rangeSignature(target.startTick, targetEnd.endTick, staves.first, staves.last) === srcSig;
+            return rangeSignature(target.startTick, targetEnd.endTick, toFirst, toLast) === srcSig;
         });
         if (!pasted) {
             showCursor();
             return { error: "The pasted bars don't match the source (MuseScore may have refused the paste)", undoSteps: steps };
         }
-        cursorState = { tick: target.startTick, staff: cursorState.staff, voice: cursorState.voice, lastChord: null };
-        return finishSelectionEdit({
-            message: "Copied bars " + src.first.number + "-" + src.last.number + " to bars " + target.number + "-" + targetEnd.number +
-                     (insert ? " (inserted)" : " (overwritten)"),
-            undoSteps: steps + 1
-        });
+        steps++;
+        touch(target.startTick, targetEnd.endTick);
+        var message = "Copied bars " + src.first.number + "-" + src.last.number + (toFirst !== staves.first || toLast !== staves.last ? " (staves " +
+                      staves.first + "-" + staves.last + ")" : "") + " to bars " + target.number + "-" + targetEnd.number +
+                      (toFirst !== staves.first ? " on staves " + toFirst + "-" + toLast : "") + (insert ? " (inserted)" : " (overwritten)");
+        if (semis) {
+            var staffIdx = [];
+            for (var s = toFirst; s <= toLast; s++) staffIdx.push(s);
+            var tr = transposeRange({ startTick: target.startTick, endTick: targetEnd.endTick, staves: staffIdx, semitones: semis });
+            if (tr.error) {
+                cmd("action://notation/cancel");
+                return { error: message + ", but transposing the copy failed: " + tr.error, undoSteps: steps };
+            }
+            steps++;
+            message += ", transposed by " + semis + " semitone(s)";
+        }
+        cursorState = { tick: target.startTick, staff: toFirst, voice: cursorState.voice, lastChord: null };
+        return finishSelectionEdit({ message: message, undoSteps: steps });
     }
 
     // ========================================
@@ -2578,13 +3661,35 @@ MuseScore {
     // SCORE ANALYSIS
     // ========================================
 
+    // The score as data. startMeasure/endMeasure (1-based, inclusive) limit
+    // the bars read; reading bars also notices edits made in MuseScore.
     function getScore(params) {
         if (!curScore) return { error: "No score open" };
-        return { success: true, analysis: getScoreSummary(), cursor: cursorInfo() };
+        var measures = listMeasures();
+        var first = isSet(params.startMeasure) ? checkInt(params.startMeasure, "startMeasure", 1, measures.length) : 1;
+        var last = isSet(params.endMeasure) ? checkInt(params.endMeasure, "endMeasure", first, measures.length) : measures.length;
+        var bars = readBars(measures, first, last);
+        absorbDigests(measures, first, bars, "user", "edited in MuseScore");
+        var summary = scoreHeader(measures);
+        summary.firstMeasure = first;
+        summary.lastMeasure = last;
+        summary.measures = bars;
+        return { success: true, analysis: summary, cursor: cursorInfo(), version: scoreVersion };
     }
 
-    function getScoreSummary() {
-        var measures = listMeasures();
+    function clefName(type) {
+        // ClefType values of MuseScore 4.7 (engraving/types/types.h)
+        var names = { 0: "treble", 1: "treble 15mb", 2: "treble 8vb", 3: "treble 8va", 4: "treble 15ma", 5: "treble 8vb",
+                      6: "treble 8vb", 7: "french violin", 8: "soprano", 9: "mezzo-soprano", 10: "alto", 11: "tenor",
+                      12: "baritone (C)", 13: "alto", 14: "soprano", 15: "alto", 16: "tenor", 17: "soprano", 18: "alto", 19: "tenor",
+                      20: "bass", 21: "bass 15mb", 22: "bass 8vb", 23: "bass 8va", 24: "bass 15ma", 25: "baritone",
+                      26: "subbass", 27: "bass", 28: "bass", 29: "percussion", 30: "percussion",
+                      31: "tab", 32: "tab", 33: "tab", 34: "tab", 35: "tenor 8vb", 36: "treble 8vb" };
+        return names[type] || ("clef " + type);
+    }
+
+    // Everything but the bars: title, staves, parts, tempo and time signatures.
+    function scoreHeader(measures) {
         var nstaves = curScore.nstaves;
         var score = {
             title: curScore.metaTag("workTitle") || curScore.title || "",
@@ -2595,8 +3700,7 @@ MuseScore {
             timeSignatures: [],
             tempos: [],
             parts: [],
-            staves: [],
-            measures: []
+            staves: []
         };
 
         var parts = curScore.parts;
@@ -2609,7 +3713,7 @@ MuseScore {
             var st = staffObj(i);
             var part = st ? st.part : null;
             var fifths = st ? st.key(tick0) : 0;
-            score.staves.push({
+            var info = {
                 name: "staff" + i,
                 index: i,
                 instrument: part ? (part.longName || part.partName) : "",
@@ -2618,7 +3722,26 @@ MuseScore {
                 part: part ? partIndexOf(part) : -1,
                 visible: part ? part.show : true,
                 keySignature: { fifths: fifths, name: keyName(fifths) }
-            });
+            };
+            try {
+                info.clef = clefName(st.clefType(tick0));
+                var tr = st.transpose(tick0);
+                if (tr && (tr.chromatic || tr.diatonic)) info.transposition = { chromatic: tr.chromatic, diatonic: tr.diatonic };
+            } catch (e) {}
+            // Key and clef changes, bar by bar
+            var keys = [], clefs = [], lastKey = fifths, lastClef = info.clef;
+            for (var m = 1; m < measures.length; m++) {
+                var f = fractionFromTicks(measures[m].startTick);
+                var k = st.key(f);
+                if (k !== lastKey) { keys.push({ measure: m + 1, fifths: k, name: keyName(k) }); lastKey = k; }
+                try {
+                    var c = clefName(st.clefType(f));
+                    if (c !== lastClef) { clefs.push({ measure: m + 1, clef: c }); lastClef = c; }
+                } catch (e2) {}
+            }
+            if (keys.length) info.keyChanges = keys;
+            if (clefs.length) info.clefChanges = clefs;
+            score.staves.push(info);
         }
         if (score.staves.length) score.keySignature = score.staves[0].keySignature;
 
@@ -2633,7 +3756,7 @@ MuseScore {
             try {
                 var swing = staffObj(sw).swing(tick0);
                 if (swing && swing.isOn) score.swing.push({ staff: sw, unit: swing.swingUnit, ratio: swing.swingRatio });
-            } catch (e) {}
+            } catch (e3) {}
         }
 
         var prevTs = "";
@@ -2644,7 +3767,31 @@ MuseScore {
                 score.timeSignatures.push({ measure: md.number, tick: md.startTick, numerator: md.numerator, denominator: md.denominator });
                 prevTs = tsText;
             }
+            // Tempo marks anywhere in the score
+            var seg = md.obj.firstSegment;
+            while (seg) {
+                var anns = seg.annotations;
+                for (var a = 0; a < anns.length; a++) {
+                    if (anns[a].type === Element.TEMPO_TEXT) {
+                        var ann = processAnnotation(anns[a]);
+                        score.tempos.push({ measure: md.number, tick: seg.tick, bpm: ann.bpm, text: ann.text });
+                    }
+                }
+                seg = seg.nextInMeasure;
+            }
+        }
+        return score;
+    }
 
+    // The contents of bars first..last (1-based): per staff the chords/rests
+    // of all voices, and the markings.
+    function readBars(measures, first, last) {
+        var nstaves = curScore.nstaves;
+        var tc = curScore.newCursor();
+        var out = [];
+        for (var mi = first - 1; mi < last; mi++) {
+            var md = measures[mi];
+            var tsText = md.numerator + "/" + md.denominator;
             var nominal = md.obj.timesigNominal;
             var measure = {
                 measure: md.number,
@@ -2665,13 +3812,6 @@ MuseScore {
             var marks = measureMarks(md.obj);
             if (marks.length) measure.marks = marks;
 
-            // Effective tempo (quarter-note BPM, includes rit./accel.) and
-            // playback time at the start of the bar.
-            tc.rewindToFraction(fractionFromTicks(md.startTick));
-            if (tc.segment) {
-                measure.tempoBpm = Math.round(tc.tempo * 60 * 100) / 100;
-                measure.timeSeconds = Math.round(tc.time(false)) / 1000;
-            }
             for (var j = 0; j < nstaves; j++) {
                 measure.elements["staff" + j] = [];
             }
@@ -2684,9 +3824,6 @@ MuseScore {
                     if (ann) {
                         ann.tick = seg.tick;
                         measure.markings.push(ann);
-                        if (ann.type === "tempo") {
-                            score.tempos.push({ measure: md.number, tick: seg.tick, bpm: ann.bpm, text: ann.text });
-                        }
                     }
                 }
                 for (var k = 0; k < nstaves; k++) {
@@ -2702,9 +3839,179 @@ MuseScore {
                 }
                 seg = seg.nextInMeasure;
             }
-            score.measures.push(measure);
+
+            // Effective tempo (quarter-note BPM, includes rit./accel.) and
+            // playback time at the start of the bar. Kept out of the digest:
+            // they change when an earlier bar changes.
+            tc.rewindToFraction(fractionFromTicks(md.startTick));
+            if (tc.segment) {
+                measure.tempoBpm = Math.round(tc.tempo * 60 * 100) / 100;
+                measure.timeSeconds = Math.round(tc.time(false)) / 1000;
+            }
+            out.push(measure);
         }
-        return score;
+        return out;
+    }
+
+    // ========================================
+    // SCORE VERSIONS
+    // ========================================
+
+    // 32-bit FNV-1a hash of a string, as hex.
+    function hashText(s) {
+        var h = 0x811c9dc5;
+        for (var i = 0; i < s.length; i++) {
+            h ^= s.charCodeAt(i);
+            h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+        }
+        return h.toString(16);
+    }
+
+    function barDigest(bar) {
+        var copy = {};
+        for (var key in bar) {
+            if (key !== "tempoBpm" && key !== "timeSeconds") copy[key] = bar[key];
+        }
+        return hashText(JSON.stringify(copy));
+    }
+
+    // [[first, last], ...] from a sorted list of bar numbers.
+    function barRanges(numbers) {
+        var out = [];
+        for (var i = 0; i < numbers.length; i++) {
+            var n = numbers[i];
+            if (out.length && out[out.length - 1][1] === n - 1) out[out.length - 1][1] = n;
+            else out.push([n, n]);
+        }
+        return out;
+    }
+
+    function bumpVersion(source, action, bars) {
+        scoreVersion++;
+        versionLog.push({ version: scoreVersion, source: source, action: action, bars: bars });
+        if (versionLog.length > maxLogEntries) versionLog.shift();
+    }
+
+    // Compares freshly read bars first.. with the stored digests and stores
+    // theirs. Returns the changed bar numbers. With no baseline (or a changed
+    // number of bars) every bar is read, and null is returned when the change
+    // can't be attributed to bars.
+    function compareDigests(measures, first, bars) {
+        if (barDigests === null || barDigests.length !== measures.length) {
+            var hadBaseline = barDigests !== null;
+            var oldDigests = barDigests;
+            var all = first === 1 && bars.length === measures.length ? bars : readBars(measures, 1, measures.length);
+            barDigests = all.map(barDigest);
+            if (!hadBaseline) return [];
+            // Bars were inserted or deleted: everything from the first difference on
+            var changed = [];
+            for (var i = 0; i < barDigests.length; i++) {
+                if (changed.length || i >= oldDigests.length || oldDigests[i] !== barDigests[i]) changed.push(i + 1);
+            }
+            if (!changed.length) changed.push(measures.length);
+            return changed;
+        }
+        var out = [];
+        for (var b = 0; b < bars.length; b++) {
+            var d = barDigest(bars[b]);
+            var idx = first - 1 + b;
+            if (barDigests[idx] !== d) {
+                out.push(idx + 1);
+                barDigests[idx] = d;
+            }
+        }
+        return out;
+    }
+
+    function absorbDigests(measures, first, bars, source, action) {
+        var changed = compareDigests(measures, first, bars);
+        if (changed.length) bumpVersion(source, action, barRanges(changed));
+        return changed;
+    }
+
+    // Reads the whole score and logs edits made in MuseScore since the last read.
+    function detectUserChanges() {
+        var measures = listMeasures();
+        absorbDigests(measures, 1, readBars(measures, 1, measures.length), "user", "edited in MuseScore");
+    }
+
+    // Declares that the running request edits [startTick, endTick]: only
+    // those bars are re-read afterwards. Without a declaration the whole
+    // score is re-read.
+    function touch(startTick, endTick) {
+        if (touchedTicks !== null) touchedTicks.push([startTick, Math.max(startTick, endTick)]);
+    }
+
+    // After an edit request: re-read the bars it touched and log the change.
+    function recordChange(action, ok) {
+        var measures = listMeasures();
+        var changed;
+        if (barDigests === null || barDigests.length !== measures.length || !touchedTicks || !touchedTicks.length) {
+            var all = readBars(measures, 1, measures.length);
+            changed = compareDigests(measures, 1, all);
+        } else {
+            var wanted = {};
+            for (var r = 0; r < touchedTicks.length; r++) {
+                for (var m = 0; m < measures.length; m++) {
+                    if (measures[m].endTick > touchedTicks[r][0] && measures[m].startTick <= touchedTicks[r][1]) wanted[m] = true;
+                }
+            }
+            changed = [];
+            for (var idx in wanted) {
+                var i = parseInt(idx, 10);
+                changed = changed.concat(compareDigests(measures, i + 1, readBars(measures, i + 1, i + 1)));
+            }
+            changed.sort(function(a, b) { return a - b; });
+        }
+        if (ok || changed.length) bumpVersion("mcp", action, changed.length ? barRanges(changed) : []);
+    }
+
+    // A different score is open than before: its versions start over.
+    function noteScoreSwitch() {
+        if (lastScore !== null && curScore.is(lastScore)) return;
+        var switched = lastScore !== null;
+        lastScore = curScore;
+        barDigests = null;
+        if (switched) {
+            cursorState = { tick: 0, staff: 0, voice: 0, lastChord: null };
+            undoCursorStack = [];
+            bumpVersion("user", "another score was opened", null);
+        }
+    }
+
+    function getVersion(params) {
+        detectUserChanges();
+        return { success: true, version: scoreVersion };
+    }
+
+    // The log entries after `version`, with the changed bars merged.
+    // complete is false when the log can't say (too old, or another score).
+    function getChangesSince(params) {
+        var validation = validateParams(params, ["version"]);
+        if (!validation.valid) return validation;
+        checkInt(params.version, "version", 0, null);
+        detectUserChanges();
+        var since = params.version;
+        var changes = versionLog.filter(function(c) { return c.version > since; });
+        var complete = since <= scoreVersion &&
+                       (since === scoreVersion || (versionLog.length > 0 && versionLog[0].version <= since + 1));
+        var bars = [];
+        for (var i = 0; i < changes.length; i++) {
+            if (changes[i].bars === null) complete = false;
+            else bars = bars.concat(changes[i].bars);
+        }
+        // merge the ranges
+        bars.sort(function(a, b) { return a[0] - b[0]; });
+        var merged = [];
+        for (var j = 0; j < bars.length; j++) {
+            var last = merged[merged.length - 1];
+            if (last && bars[j][0] <= last[1] + 1) last[1] = Math.max(last[1], bars[j][1]);
+            else merged.push([bars[j][0], bars[j][1]]);
+        }
+        var n = listMeasures().length;
+        merged = merged.filter(function(r) { return r[0] <= n; }).map(function(r) { return [r[0], Math.min(r[1], n)]; });
+        return { success: true, version: scoreVersion, since: since, complete: complete, changes: changes, changedBars: merged,
+                 numMeasures: n };
     }
 
     // ========================================
@@ -2723,8 +4030,17 @@ MuseScore {
             });
         });
 
+        // Versions start at a random number, so a version from an earlier run
+        // of the plugin can't be mistaken for a current one.
+        scoreVersion = (Math.floor(Math.random() * 9000) + 1000) * 100;
         if (curScore) {
             cursorState = { tick: 0, staff: 0, voice: 0, lastChord: null };
+            lastScore = curScore;
+            try {
+                detectUserChanges();   // the baseline digests
+            } catch (e) {
+                console.log("Could not read the score: " + e.toString());
+            }
             showCursor();
         }
     }

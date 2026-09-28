@@ -3876,7 +3876,10 @@ MuseScore {
         var first = isSet(params.startMeasure) ? checkInt(params.startMeasure, "startMeasure", 1, measures.length) : 1;
         var last = isSet(params.endMeasure) ? checkInt(params.endMeasure, "endMeasure", first, measures.length) : measures.length;
         var bars = readBars(measures, first, last);
-        absorbDigests(measures, first, bars, "user", "edited in MuseScore");
+        // Inside an edit request (a sequence that also edits), the edit's own
+        // record re-reads these bars afterwards: comparing now would log its
+        // changes as the user's.
+        if (touchedTicks === null) absorbDigests(measures, first, bars, "user", "edited in MuseScore");
         var summary = scoreHeader(measures);
         summary.firstMeasure = first;
         summary.lastMeasure = last;

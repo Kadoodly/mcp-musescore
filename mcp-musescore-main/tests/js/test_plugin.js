@@ -601,6 +601,17 @@ test('versions: bar-level digests ignore tempo; the log says which bars an edit 
     assert.deepStrictEqual(ok(ms.call('getChangesSince', { version: v0 + 1 })).changedBars, [[1, 1]]);
 });
 
+test('versions: a getScore step inside an editing sequence does not blame the user', () => {
+    const ms = fresh();
+    const v0 = ok(ms.call('getVersion')).version;
+    ok(ms.call('processSequence', { sequence: [
+        { action: 'writeVoice', params: { measure: 2, events: [notes([60], '1/1')] } },
+        { action: 'getScore', params: { startMeasure: 2, endMeasure: 2 } },
+    ] }));
+    const ch = ok(ms.call('getChangesSince', { version: v0 }));
+    assert.deepStrictEqual(ch.changes.map(c => [c.source, c.action, c.bars]), [['mcp', 'processSequence', [[2, 2]]]]);
+});
+
 test('versions: another score being opened makes the log incomplete', () => {
     const ms = fresh();
     const v0 = ok(ms.call('getVersion')).version;

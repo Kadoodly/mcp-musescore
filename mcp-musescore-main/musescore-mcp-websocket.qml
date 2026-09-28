@@ -853,7 +853,14 @@ MuseScore {
         }
 
         if (element.tuplet) {
-            base.tuplet = { actual: element.tuplet.actualNotes, normal: element.tuplet.normalNotes };
+            var tup = element.tuplet;
+            base.tuplet = { actual: tup.actualNotes, normal: tup.normalNotes };
+            // Which tuplet: its start and length (two triplets in a row are two groups)
+            try {
+                base.tuplet.startTick = tup.fraction.ticks;
+                base.tuplet.ticks = tup.actualDuration.ticks;
+            } catch (e) {}
+            base.nominalTicks = element.duration.ticks;
         }
 
         if (element.name === "Chord") {
@@ -869,10 +876,13 @@ MuseScore {
             for (var k = 0; k < notes.length; k++) {
                 var note = notes[k];
                 if (note.tieForward) base.isTie = true;
+                // tpc1 is the concert spelling, which matches pitch (note.tpc
+                // follows the Concert Pitch button)
+                var tpc = isSet(note.tpc1) ? note.tpc1 : note.tpc;
                 base.notes.push({
                     pitchMidi: note.pitch,
-                    tpc: note.tpc,
-                    pitchName: getTpcName(note.tpc),
+                    tpc: tpc,
+                    pitchName: getTpcName(tpc),
                     tiedForward: note.tieForward ? true : false,
                     tiedBack: note.tieBack ? true : false
                 });
@@ -2497,11 +2507,14 @@ MuseScore {
     // Replaces bars startMeasure..endMeasure with new music, in one command:
     // parts [{staff, voice, events}] each fill the whole section; the other
     // voices of those staves are cleared (unless clearOtherVoices is false).
+    // Bars past the end of the score are appended (in the last bar's time
+    // signature), so new music for several staves can be added at the end.
     function replaceSection(params) {
         if (!curScore) return { error: "No score open" };
         if (!isSet(params.startMeasure)) return { error: "Missing required parameters: startMeasure" };
-        var range = barRange(params);
-        var length = range.endTick - range.startTick;
+        var count = listMeasures().length;
+        var firstBar = checkInt(params.startMeasure, "startMeasure", 1, count + 1);
+        var lastBar = isSet(params.endMeasure) ? checkInt(params.endMeasure, "endMeasure", firstBar, count + 1000) : firstBar;
         if (!Array.isArray(params.parts) || !params.parts.length) return { error: "parts must be a non-empty list of {staff, voice, events}" };
         var clearOthers = boolParam(params, "clearOtherVoices", true);
         var parts = [];
@@ -2518,16 +2531,22 @@ MuseScore {
             var events = parseVoiceEvents(part.events, false);
             var total = 0;
             for (var e = 0; e < events.length; e++) total += events[e].ticks;
-            if (total !== length) {
-                throw new Error(where + " (staff " + staff + " voice " + voice + ") lasts " + ticksText(total) + ", but bars " + range.first.number + "-" +
-                                range.last.number + " last " + ticksText(length) + " (fill it exactly; use rests)");
-            }
-            parts.push({ staff: staff, voice: voice, events: events });
+            parts.push({ staff: staff, voice: voice, events: events, total: total, where: where });
         }
         // voice 1 first: the other voices need its chords/rests to hang on
         parts.sort(function(a, b) { return a.voice - b.voice || a.staff - b.staff; });
 
         return mutate(function() {
+            var appended = Math.max(0, lastBar - count);
+            if (appended) curScore.appendMeasures(appended);
+            var range = barRange({ startMeasure: firstBar, endMeasure: lastBar });
+            var length = range.endTick - range.startTick;
+            for (var q = 0; q < parts.length; q++) {
+                if (parts[q].total !== length) {
+                    throw new Error(parts[q].where + " (staff " + parts[q].staff + " voice " + parts[q].voice + ") lasts " + ticksText(parts[q].total) +
+                                    ", but bars " + firstBar + "-" + lastBar + " last " + ticksText(length) + " (fill it exactly; use rests)");
+                }
+            }
             var warnings = [];
             var staves = [];
             for (var p = 0; p < parts.length; p++) if (staves.indexOf(parts[p].staff) < 0) staves.push(parts[p].staff);
@@ -2549,8 +2568,9 @@ MuseScore {
             }
             touch(range.startTick, range.endTick);
             cursorState = { tick: range.endTick, staff: parts[0].staff, voice: parts[0].voice, lastChord: null };
-            var r = { message: "Replaced bars " + range.first.number + "-" + range.last.number + " with " + parts.length + " part(s): " +
-                               written + " notes/rests, " + ties + " tie(s), one undo step", written: written, ties: ties };
+            var r = { message: (appended ? "Appended " + appended + " bar(s); w" : "W") + "rote bars " + firstBar + "-" + lastBar + " with " +
+                               parts.length + " part(s): " + written + " notes/rests, " + ties + " tie(s), one undo step",
+                      written: written, ties: ties, startMeasure: firstBar, endMeasure: lastBar };
             if (warnings.length) r.warnings = warnings;
             return r;
         });

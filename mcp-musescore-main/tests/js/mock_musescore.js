@@ -478,7 +478,16 @@ class MockMuseScore {
             get duration() { return eng.frac(live().ticks); },
             set duration(f) { eng.changeCRlen(id, f.ticks); },
             get actualDuration() { return eng.frac(live().actual); },
-            get tuplet() { const c = live(); return c.tuplet ? { actualNotes: c.tuplet.actual, normalNotes: c.tuplet.normal } : null; },
+            get tuplet() {
+                const c = live();
+                if (!c.tuplet) return null;
+                const members = eng.trackCrs(c.track).filter(x => x.tuplet && x.tuplet.id === c.tuplet.id);
+                return {
+                    actualNotes: c.tuplet.actual, normalNotes: c.tuplet.normal,
+                    fraction: eng.frac(Math.min(...members.map(x => x.tick))),
+                    actualDuration: eng.frac(members.reduce((n, x) => n + x.actual, 0)),
+                };
+            },
             get notes() { return live().notes.map(n => eng.wrapNote(n.id)); },
             get lyrics() { return live().lyrics.map(l => Object.assign({}, l)); },
             get articulations() {

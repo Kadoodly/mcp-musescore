@@ -766,7 +766,7 @@ test('replaceSection: new music for bars, all parts in one undo step', () => {
         { staff: 0, events: [notes([72], '3/4'), notes([74], '1/4', true), notes([74], '1/2'), notes([76], '1/2')] },
         { staff: 1, events: [notes([36], '2/1')] },
     ] }));
-    assert.match(r.message, /Replaced bars 1-2 with 3 part\(s\)/);
+    assert.match(r.message, /^Wrote bars 1-2 with 3 part\(s\)/);
     assert.strictEqual(ms.undoStack.length, undo + 1);
     expectTrack(ms, 0, 0, 2 * WHOLE, [[0, 1440, [72]], [1440, Q, [74], [74]], [WHOLE, 960, [74], [], [74]], [WHOLE + 960, 960, [76]]]);
     assert.deepStrictEqual(ms.dump(1, 0, 2 * WHOLE).map(c => [c.tick, c.rest ? 'r' : c.pitches[0]]), [[0, 55], [WHOLE, 'r']]);
@@ -777,6 +777,13 @@ test('replaceSection: new music for bars, all parts in one undo step', () => {
     fails(ms.call('replaceSection', { startMeasure: 1, parts: [{ staff: 0, events: [notes([60], '1/1')] }, { staff: 0, voice: 0, events: [notes([60], '1/1')] }] }),
           /given twice/);
     fails(ms.call('replaceSection', { startMeasure: 1, parts: [{ staff: 0, events: [notes([60], '1/1')], color: 'red' }] }), /unknown parameter 'color'/);
+    // bars past the end are appended
+    const n = ms.state.measures.length;
+    const r2 = ok(ms.call('replaceSection', { startMeasure: n + 1, endMeasure: n + 2, parts: [
+        { staff: 0, events: [notes([60], '1/1'), notes([62], '1/1')] }, { staff: 1, events: [notes([48], '2/1')] }] }));
+    assert.match(r2.message, /^Appended 2 bar\(s\); wrote bars 5-6/);
+    assert.strictEqual(ms.state.measures.length, n + 2);
+    fails(ms.call('replaceSection', { startMeasure: n + 4, parts: [{ staff: 0, events: [notes([60], '1/1')] }] }), /startMeasure must be an integer 1-7/);
     // clearOtherVoices: false keeps the other voices
     ok(ms.call('replaceSection', { startMeasure: 1, clearOtherVoices: false, parts: [{ staff: 0, events: [notes([60], '1/1')] }] }));
     assert.deepStrictEqual(ms.dump(1, 0, WHOLE).map(c => c.pitches[0]), [55]);
@@ -975,6 +982,7 @@ if (process.argv.includes('--plans')) {
         actionParams: ms.plugin.get('actionParams'),
         sequenceCommands: ms.plugin.get('sequenceCommands'),
         nonAtomicCommands: ms.plugin.get('nonAtomicCommands'),
+        readOnlyActions: ms.plugin.get('readOnlyActions'),
         noteValueTicks: ms.plugin.get('noteValueTicks'),
     }));
 } else {

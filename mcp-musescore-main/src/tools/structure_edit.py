@@ -4,6 +4,7 @@ tempo changes, slurs, hairpins, articulations, copying and deleting bars."""
 from typing import Any, Dict, List, Literal, Optional
 
 from ..client import MuseScoreClient
+from ..types import Offset
 
 
 def _params(**kwargs) -> Dict[str, Any]:
@@ -20,9 +21,13 @@ def setup_structure_edit_tools(mcp, client: MuseScoreClient):
         to_measure: int,
         insert: bool = True,
         staff: Optional[int] = None,
+        to_staff: Optional[int] = None,
+        transpose: Optional[int] = None,
+        expected_version: Optional[int] = None,
     ):
         """Copy bars start_measure..end_measure (1-based, inclusive) to to_measure, e.g. to write out a
-        repeated chorus. Copies everything in those bars: notes, lyrics, dynamics, articulations.
+        repeated chorus, double a melody on another instrument, or repeat a phrase a step higher.
+        Copies everything in those bars: notes, lyrics, dynamics, articulations.
 
         Args:
             start_measure: First bar to copy.
@@ -31,23 +36,29 @@ def setup_structure_edit_tools(mcp, client: MuseScoreClient):
             insert: True (default) inserts new bars for the copy, pushing later music back.
                 False overwrites the bars at to_measure.
             staff: Copy only this staff (default: all staves).
+            to_staff: Paste onto this staff instead (with staff: e.g. copy the right hand to a flute).
+            transpose: Then transpose the copy by this many semitones (e.g. 12 = an octave up).
+            expected_version: Refuse if the score changed since this version (see write_voice).
 
-        Uses MuseScore's clipboard. Undo steps: one per inserted bar plus one for the paste
-        (reported as undoSteps in the result).
+        Uses MuseScore's clipboard. Undo steps: one per inserted bar, one for the paste and one for
+        the transposition (reported as undoSteps in the result).
         """
-        return await client.send_command("copyMeasures", _params(
-            startMeasure=start_measure, endMeasure=end_measure, toMeasure=to_measure, insert=insert, staff=staff))
+        params = _params(startMeasure=start_measure, endMeasure=end_measure, toMeasure=to_measure, insert=insert,
+                         staff=staff, toStaff=to_staff, transpose=transpose, expectedVersion=expected_version)
+        return await client.send_command("copyMeasures", params)
 
     @mcp.tool()
-    async def delete_measures(start_measure: int, end_measure: Optional[int] = None):
+    async def delete_measures(start_measure: int, end_measure: Optional[int] = None, expected_version: Optional[int] = None):
         """Delete whole bars (the bars disappear, later music moves up). To only empty bars, use
-        delete_selection(measure=...) instead.
+        clear_range instead.
 
         Args:
             start_measure: First bar to delete (1-based).
             end_measure: Last bar to delete (inclusive). Default: just start_measure.
+            expected_version: Refuse if the score changed since this version (see write_voice).
         """
-        return await client.send_command("deleteMeasures", _params(startMeasure=start_measure, endMeasure=end_measure))
+        return await client.send_command("deleteMeasures", _params(startMeasure=start_measure, endMeasure=end_measure,
+                                                                   expectedVersion=expected_version))
 
     @mcp.tool()
     async def add_repeat(start_measure: int, end_measure: int, times: int = 2):
@@ -95,16 +106,18 @@ def setup_structure_edit_tools(mcp, client: MuseScoreClient):
         return await client.send_command("addJump", {"type": type, "measure": measure})
 
     @mcp.tool()
-    async def add_section_label(text: str, measure: Optional[int] = None, tick: Optional[int] = None):
+    async def add_section_label(text: str, measure: Optional[int] = None, offset: Optional[Offset] = None,
+                                tick: Optional[int] = None):
         """Add a section label (rehearsal mark) such as "Verse 1", "Chorus", "Bridge" or "A" above the
         score. Replaces a label already at that position.
 
         Args:
             text: The label.
             measure: Bar where the section starts (1-based). Default: the cursor position.
+            offset: With measure: position inside the bar.
             tick: Exact position instead of a bar.
         """
-        return await client.send_command("addRehearsalMark", _params(text=text, measure=measure, tick=tick))
+        return await client.send_command("addRehearsalMark", _params(text=text, measure=measure, offset=offset, tick=tick))
 
     @mcp.tool()
     async def set_key_signature(
@@ -129,6 +142,7 @@ def setup_structure_edit_tools(mcp, client: MuseScoreClient):
     async def add_tempo_change(
         type: Literal["rit.", "rall.", "accel.", "allarg.", "string.", "smorz.", "morendo"],
         measure: Optional[int] = None,
+        offset: Optional[Offset] = None,
         tick: Optional[int] = None,
         end_measure: Optional[int] = None,
         end_tick: Optional[int] = None,
@@ -144,6 +158,7 @@ def setup_structure_edit_tools(mcp, client: MuseScoreClient):
         Args:
             type: The kind of change.
             measure: Bar where it starts (1-based). Default: the cursor position.
+            offset: With measure: where in the bar it starts.
             tick: Exact start instead of a bar.
             end_measure: Last bar it covers (inclusive). Default: to the end of the start bar.
             end_tick: Exact end instead of a bar.
@@ -153,7 +168,7 @@ def setup_structure_edit_tools(mcp, client: MuseScoreClient):
             a_tempo: Put "a tempo" (back to the original tempo) right after the change.
         """
         return await client.send_command("addGradualTempoChange", _params(
-            type=type, measure=measure, tick=tick, endMeasure=end_measure, endTick=end_tick,
+            type=type, measure=measure, offset=offset, tick=tick, endMeasure=end_measure, endTick=end_tick,
             targetBpm=target_bpm, factor=factor, aTempo=a_tempo or None))
 
     @mcp.tool()
@@ -162,18 +177,22 @@ def setup_structure_edit_tools(mcp, client: MuseScoreClient):
                       "slur", "hairpin", "volta", "gradualTempoChange"],
         tick: Optional[int] = None,
         measure: Optional[int] = None,
+        offset: Optional[Offset] = None,
         staff: Optional[int] = None,
     ):
-        """Remove a marking at an exact position (tick from get_tempo_map/get_score, or a bar start).
+        """Remove a marking at an exact position (as get_score shows it: a bar and @offset, or a tick).
         Lines (slur, hairpin, volta, gradualTempoChange) are matched by where they start.
+        "text" removes staff, system and expression text (pedal marks are staff text).
 
         Args:
             kind: What to remove.
             tick: Exact position.
-            measure: Or the start of this bar.
+            measure: Or this bar, at its start or at offset.
+            offset: With measure: position inside the bar.
             staff: Only on this staff (default: any staff).
         """
-        return await client.send_command("removeMarking", _params(kind=kind, tick=tick, measure=measure, staff=staff))
+        return await client.send_command("removeMarking", _params(kind=kind, tick=tick, measure=measure, offset=offset,
+                                                                  staff=staff))
 
     @mcp.tool()
     async def add_slur(

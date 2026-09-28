@@ -3,6 +3,7 @@
 from typing import Optional
 
 from ..client import MuseScoreClient
+from ..types import Offset
 from .navigation import position_params
 
 
@@ -25,22 +26,29 @@ def setup_time_tempo_tools(mcp, client: MuseScoreClient):
     @mcp.tool()
     async def set_tempo(
         bpm: float,
+        beat_unit: Optional[str] = None,
         text: Optional[str] = None,
         measure: Optional[int] = None,
+        offset: Optional[Offset] = None,
         tick: Optional[int] = None,
     ):
-        """Add a tempo marking (quarter note = bpm), replacing one already at that position.
+        """Add a tempo marking (it changes playback), replacing one already at that position.
 
         Args:
-            bpm: Quarter-note beats per minute.
+            bpm: Beats per minute of beat_unit.
+            beat_unit: The beat as a fraction of a whole note: "1/4" (default), "3/8" (dotted quarter, for
+                6/8), "1/2" (for 2/2), "1/8". Shown in the metronome mark.
             text: Optional tempo word shown before the metronome mark, e.g. "Allegro".
             measure: Measure (1-based) to place it at. Default: the cursor position.
-            tick: Absolute tick to place it at (must be the start of a note/rest).
+            offset: With measure: position inside it ("1/2" = halfway through a 4/4 bar).
+            tick: Absolute tick instead of measure.
         """
         params = {"bpm": bpm}
+        if beat_unit:
+            params["beatUnit"] = beat_unit
         if text:
             params["text"] = text
-        params.update(position_params(measure, tick))
+        params.update(position_params(measure, tick, offset=offset))
         return await client.send_command("setTempo", params)
 
     @mcp.tool()
@@ -49,6 +57,7 @@ def setup_time_tempo_tools(mcp, client: MuseScoreClient):
         staff: Optional[int] = None,
         voice: Optional[int] = None,
         measure: Optional[int] = None,
+        offset: Optional[Offset] = None,
         tick: Optional[int] = None,
     ):
         """Add a dynamic marking under the note/rest at the cursor (or the given position).
@@ -59,11 +68,12 @@ def setup_time_tempo_tools(mcp, client: MuseScoreClient):
                 sff, sffz, sfp, sfpp, fz, rf, rfz.
             staff: Staff index (0-based). Default: the cursor's staff.
             voice: Voice 0-3. Default: the cursor's voice.
-            measure: Place at the start of this measure (1-based).
+            measure: Place in this measure (1-based), at its start or at offset.
+            offset: With measure: position inside it ("1/4" = beat 2 in 4/4).
             tick: Place at this absolute tick.
         """
         params = {"dynamic": dynamic}
-        params.update(position_params(measure, tick, staff, voice))
+        params.update(position_params(measure, tick, staff, voice, offset))
         return await client.send_command("addDynamic", params)
 
     @mcp.tool()
@@ -71,6 +81,7 @@ def setup_time_tempo_tools(mcp, client: MuseScoreClient):
         staff: Optional[int] = None,
         voice: Optional[int] = None,
         measure: Optional[int] = None,
+        offset: Optional[Offset] = None,
         tick: Optional[int] = None,
     ):
         """Add a fermata on the note/rest at the cursor (or the given position).
@@ -81,7 +92,8 @@ def setup_time_tempo_tools(mcp, client: MuseScoreClient):
         Args:
             staff: Staff index (0-based). Default: the cursor's staff.
             voice: Voice 0-3. Default: the cursor's voice.
-            measure: Place at the start of this measure (1-based).
+            measure: Place in this measure (1-based), at its start or at offset.
+            offset: With measure: position inside it.
             tick: Place at this absolute tick.
         """
-        return await client.send_command("addFermata", position_params(measure, tick, staff, voice))
+        return await client.send_command("addFermata", position_params(measure, tick, staff, voice, offset))

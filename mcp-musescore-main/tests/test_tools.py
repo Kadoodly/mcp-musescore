@@ -8,7 +8,7 @@ from typing import get_args
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
 
-from src.types import SEQUENCE_ACTIONS
+from src.types import PYTHON_ONLY_PARAMS, SEQUENCE_ACTIONS
 from tests.conftest import ROOT
 
 TOOLS_MD = ROOT / "skills" / "mcp-musescore" / "references" / "tools.md"
@@ -16,9 +16,18 @@ TOOLS_MD = ROOT / "skills" / "mcp-musescore" / "references" / "tools.md"
 # Valid values for arguments whose type alone doesn't say enough.
 SAMPLES = {
     "duration": "1/4",
+    "offset": "1/4",
+    "beat_unit": "3/8",
+    "parts": [{"staff": 0, "notation": "C4:w"}, {"staff": 1, "voice": 1, "events": [{"rest": True, "duration": "1/1"}]}],
+    "staves": [0],
+    "voices": [0],
+    "semitones": 2,
+    "expected_version": 1234500,
     "ratio": {"numerator": 3, "denominator": 2},
     "events": [{"pitches": [60], "duration": "1/4", "tie": True}, {"pitches": [60], "duration": "1/4"}],
-    "sequence": [{"action": "addNote", "params": {"pitch": 60, "duration": "1/4"}}],
+    "sequence": [{"action": "addNote", "params": {"pitch": 60, "duration": "1/4"}},
+                 {"action": "writeVoice", "params": {"notation": "C4:q D4"}},
+                 {"action": "replaceSection", "params": {"startMeasure": 2, "parts": [{"staff": 0, "notation": "C4:w"}]}}],
     "lyrics": ["la"],
     "pitch": 60,
     "voice": 1,
@@ -48,7 +57,12 @@ def sample(name, schema):
 
 
 def all_args(tool):
-    return {name: sample(name, prop) for name, prop in tool.inputSchema["properties"].items()}
+    args = {name: sample(name, prop) for name, prop in tool.inputSchema["properties"].items()}
+    if "events" in args and "notation" in args:      # exactly one of them
+        del args["notation"]
+    if tool.name == "list_instruments":
+        args = {"query": "violin"}
+    return args
 
 
 def required_args(tool):
@@ -59,10 +73,10 @@ def required_args(tool):
 def test_tool_count_and_every_tool_documented(server):
     app, _ = server
     names = [t.name for t in tools(app)]
-    assert len(names) == 51
+    assert len(names) == 69
     assert "write_voice" in names
     doc = TOOLS_MD.read_text()
-    assert "currently registers 51 public tools" in doc
+    assert "currently registers 69 public tools" in doc
     missing = [n for n in names if f"`{n}`" not in doc]
     assert not missing, f"tools.md doesn't mention {missing}"
 
@@ -100,7 +114,9 @@ def test_params_sent_are_accepted_by_the_plugin(server, plugin_tables):
     assert client.sent
     for action, params in client.sent:
         assert action in allowed, action
-        unknown = set(params) - set(allowed[action])
+        # edits (not reads) may carry expectedVersion at the top level
+        extra = set() if action in plugin_tables["readOnlyActions"] else {"expectedVersion"}
+        unknown = set(params) - set(allowed[action]) - extra
         assert not unknown, f"{action} sends {unknown}, which the plugin rejects"
         if action == "processSequence":
             for step in params["sequence"]:
@@ -111,6 +127,7 @@ def test_sequence_types_match_the_plugin(plugin_tables):
     assert set(SEQUENCE_ACTIONS) == set(plugin_tables["sequenceCommands"])
     for action, (params_type, _) in SEQUENCE_ACTIONS.items():
         keys = set(params_type.__required_keys__) | set(params_type.__optional_keys__)
+        keys -= PYTHON_ONLY_PARAMS.get(action, set())
         assert keys == set(plugin_tables["actionParams"][action]), action
 
 
@@ -193,7 +210,7 @@ def test_add_tuplet_sends_objects(server):
 
 def test_process_sequence_normalizes_steps(server):
     app, client = server
-    call(app, "processSequence", {"atomic": True, "sequence": [
+    call(app, "process_sequence", {"atomic": True, "sequence": [
         {"action": "setCursor", "params": {"measure": 1}},
         {"action": "addNote", "params": {"pitch": 60, "duration": {"numerator": 2, "denominator": 8}, "tie": True}},
         {"action": "writeVoice", "params": {"events": [{"pitches": [60], "duration": "2/4", "tie": True}, {"pitches": [60], "duration": "1/4"}]}},
@@ -216,7 +233,7 @@ def test_process_sequence_normalizes_steps(server):
 def test_process_sequence_rejects_bad_steps(server, sequence, message):
     app, client = server
     with pytest.raises(ToolError, match=message):
-        call(app, "processSequence", {"sequence": sequence})
+        call(app, "process_sequence", {"sequence": sequence})
     assert client.sent == []
 
 

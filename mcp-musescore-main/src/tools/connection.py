@@ -1,9 +1,8 @@
 """Connection and utility tools for MuseScore MCP."""
 
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, Optional
 
 from ..client import MuseScoreClient
-from ..utils.lilypond_converter import json_to_lilypond
 
 
 def format_cursor(cursor: Optional[Dict[str, Any]]) -> str:
@@ -65,34 +64,3 @@ def setup_connection_tools(mcp, client: MuseScoreClient):
     async def ping_musescore():
         """Ping the MuseScore WebSocket API to check connection."""
         return await client.send_command("ping")
-
-    @mcp.tool()
-    async def get_score(
-        format: Literal["lilypond", "json"] = "lilypond",
-        start_measure: Optional[int] = None,
-        end_measure: Optional[int] = None,
-    ):
-        """Get the current score: title, key and time signatures, tempo, the instrument on
-        each staff, the cursor position, and the music itself.
-
-        Args:
-            format: "lilypond" (default) gives a readable summary plus LilyPond notation.
-                "json" gives the full raw analysis (per-measure elements with ticks, voices,
-                pitches, lyrics with verse and syllabic, dynamics/tempo/fermata markings).
-            start_measure: First measure to include (1-based). Default: first measure.
-            end_measure: Last measure to include (1-based, inclusive). Default: last measure.
-        """
-        res = await client.send_command("getScore")
-        if not res.get("success") or "analysis" not in res:
-            return res
-
-        analysis = res["analysis"]
-        if format == "json":
-            if start_measure or end_measure:
-                lo, hi = start_measure or 1, end_measure or analysis.get("numMeasures", 0)
-                analysis["measures"] = [m for m in analysis.get("measures", []) if lo <= m.get("measure", 0) <= hi]
-            return {"analysis": analysis, "cursor": res.get("cursor")}
-
-        header = format_score_header(analysis, res.get("cursor"))
-        lily = json_to_lilypond(analysis, start_measure, end_measure)
-        return f"{header}\n[Score]\n{lily}"

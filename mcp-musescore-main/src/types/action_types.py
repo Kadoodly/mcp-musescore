@@ -1,14 +1,50 @@
-"""TypedDict definitions for MuseScore MCP action sequences.
+"""TypedDict definitions for MuseScore MCP action sequences and write_voice events.
 
 Position params (all optional): staff (0-based), voice (0-3), measure (1-based)
 and tick (480 per quarter note). staff and voice stick for later actions.
+
+Every dict here rejects unknown keys (extra="forbid"), matching the plugin's
+per-action parameter whitelist (actionParams in musescore-mcp-websocket.qml).
 """
 
-from typing import Dict, Any, List, Literal, NotRequired, TypedDict
+from typing import Annotated, List, Literal, Union
 
-Duration = Dict[Literal["numerator", "denominator"], int]
+from pydantic import ConfigDict, Field, with_config
+from typing_extensions import NotRequired, TypedDict
+
+STRICT = ConfigDict(extra="forbid")
+
+DurationText = Annotated[str, Field(
+    pattern=r"^\s*\d+\s*/\s*\d+\s*$",
+    description='Fraction of a whole note, e.g. "1/4" = quarter, "3/8" = dotted quarter, "5/8" = half tied to eighth',
+)]
 
 
+@with_config(STRICT)
+class DurationObject(TypedDict):
+    numerator: int
+    denominator: int
+
+
+Duration = Union[DurationText, DurationObject]
+Pitch = Annotated[int, Field(ge=0, le=127, description="MIDI pitch, 60 = middle C")]
+
+
+@with_config(STRICT)
+class VoiceEvent(TypedDict):
+    """One write_voice event: a note/chord (pitches) or a rest (rest: true)."""
+    pitches: NotRequired[List[Pitch]]
+    rest: NotRequired[bool]
+    duration: Duration
+    tie: NotRequired[Union[bool, List[Pitch]]]
+
+
+@with_config(STRICT)
+class EmptyParams(TypedDict):
+    pass
+
+
+@with_config(STRICT)
 class PositionParams(TypedDict):
     staff: NotRequired[int]
     voice: NotRequired[int]
@@ -16,68 +52,59 @@ class PositionParams(TypedDict):
     tick: NotRequired[int]
 
 
-class getScoreAction(TypedDict):
-    action: Literal["getScore"]
-    params: Dict[str, Any]
+@with_config(STRICT)
+class StaffVoiceParams(TypedDict):
+    staff: NotRequired[int]
+    voice: NotRequired[int]
 
 
+def _action(name: str, params_type, required: bool = False):
+    """A {"action": name, "params": params_type} step type."""
+    fields = {"action": Literal[name], "params": params_type if required else NotRequired[params_type]}
+    return with_config(STRICT)(TypedDict(f"{name}Action", fields))
+
+
+# --- Notes and rests ---------------------------------------------------------
+
+@with_config(STRICT)
 class addNoteParams(PositionParams):
-    pitch: int
-    duration: Duration
+    pitch: Pitch
+    duration: NotRequired[Duration]
     advanceCursorAfterAction: NotRequired[bool]
     addToChord: NotRequired[bool]
+    tie: NotRequired[bool]
 
 
-class addNoteAction(TypedDict):
-    action: Literal["addNote"]
-    params: addNoteParams
-
-
+@with_config(STRICT)
 class addRestParams(PositionParams):
     duration: Duration
     advanceCursorAfterAction: NotRequired[bool]
 
 
-class addRestAction(TypedDict):
-    action: Literal["addRest"]
-    params: addRestParams
-
-
+@with_config(STRICT)
 class addTupletParams(PositionParams):
-    duration: Duration
-    ratio: Duration
+    duration: DurationObject
+    ratio: DurationObject
     advanceCursorAfterAction: NotRequired[bool]
 
 
-class addTupletAction(TypedDict):
-    action: Literal["addTuplet"]
-    params: addTupletParams
+@with_config(STRICT)
+class writeVoiceParams(PositionParams):
+    events: List[VoiceEvent]
 
 
+@with_config(STRICT)
 class addLyricsParams(PositionParams):
     lyrics: List[str]
     verse: NotRequired[int]
 
 
-class addLyricsAction(TypedDict):
-    action: Literal["addLyrics"]
-    params: addLyricsParams
-
-
+@with_config(STRICT)
 class addDynamicParams(PositionParams):
     dynamic: str
 
 
-class addDynamicAction(TypedDict):
-    action: Literal["addDynamic"]
-    params: addDynamicParams
-
-
-class addFermataAction(TypedDict):
-    action: Literal["addFermata"]
-    params: PositionParams
-
-
+@with_config(STRICT)
 class setTempoParams(TypedDict):
     bpm: float
     text: NotRequired[str]
@@ -85,111 +112,66 @@ class setTempoParams(TypedDict):
     tick: NotRequired[int]
 
 
-class setTempoAction(TypedDict):
-    action: Literal["setTempo"]
-    params: setTempoParams
+# --- Instruments ---------------------------------------------------------------
 
-
+@with_config(STRICT)
 class addInstrumentParams(TypedDict):
     instrumentId: str
 
 
-class addInstrumentAction(TypedDict):
-    action: Literal["addInstrument"]
-    params: addInstrumentParams
-
-
+@with_config(STRICT)
 class removeInstrumentParams(TypedDict):
     part: NotRequired[int]
     staff: NotRequired[int]
 
 
-class removeInstrumentAction(TypedDict):
-    action: Literal["removeInstrument"]
-    params: removeInstrumentParams
-
-
+@with_config(STRICT)
 class setStaffMuteParams(TypedDict):
     staff: int
     mute: bool
 
 
-class setStaffMuteAction(TypedDict):
-    action: Literal["setStaffMute"]
-    params: setStaffMuteParams
-
-
+@with_config(STRICT)
 class setInstrumentSoundParams(TypedDict):
     staff: int
     instrumentId: str
 
 
-class setInstrumentSoundAction(TypedDict):
-    action: Literal["setInstrumentSound"]
-    params: setInstrumentSoundParams
+# --- Measures, navigation, selection -----------------------------------------------
+
+@with_config(STRICT)
+class countParams(TypedDict):
+    count: NotRequired[int]
 
 
-class appendMeasureAction(TypedDict):
-    action: Literal["appendMeasure"]
-    params: Dict[str, Any]
-
-
+@with_config(STRICT)
 class insertMeasureParams(TypedDict):
     measure: NotRequired[int]
     count: NotRequired[int]
 
 
-class insertMeasureAction(TypedDict):
-    action: Literal["insertMeasure"]
-    params: insertMeasureParams
-
-
+@with_config(STRICT)
 class deleteSelectionParams(TypedDict):
     measure: NotRequired[int]
     staff: NotRequired[int]
 
 
-class deleteSelectionAction(TypedDict):
-    action: Literal["deleteSelection"]
-    params: deleteSelectionParams
-
-
-class getCursorInfoAction(TypedDict):
-    action: Literal["getCursorInfo"]
-    params: Dict[str, Any]
-
-
-class setCursorAction(TypedDict):
-    action: Literal["setCursor"]
-    params: PositionParams
-
-
-class goToMeasureParams(TypedDict):
+@with_config(STRICT)
+class goToMeasureParams(StaffVoiceParams):
     measure: int
-    staff: NotRequired[int]
-    voice: NotRequired[int]
 
 
-class goToMeasureAction(TypedDict):
-    action: Literal["goToMeasure"]
-    params: goToMeasureParams
+@with_config(STRICT)
+class moveElementParams(TypedDict):
+    numElements: NotRequired[int]
 
 
-class nextElementAction(TypedDict):
-    action: Literal["nextElement"]
-    params: Dict[str, Any]
+@with_config(STRICT)
+class selectCurrentMeasureParams(PositionParams):
+    allStaves: NotRequired[bool]
 
 
-class prevElementAction(TypedDict):
-    action: Literal["prevElement"]
-    params: Dict[str, Any]
-
-
-class selectCurrentMeasureAction(TypedDict):
-    action: Literal["selectCurrentMeasure"]
-    params: Dict[str, Any]
-
-
+@with_config(STRICT)
 class selectCustomRangeParams(TypedDict):
     startTick: int
     endTick: int
@@ -197,70 +179,158 @@ class selectCustomRangeParams(TypedDict):
     endStaff: int
 
 
-class selectCustomRangeAction(TypedDict):
-    action: Literal["selectCustomRange"]
-    params: selectCustomRangeParams
-
-
-class goToFinalMeasureAction(TypedDict):
-    action: Literal["goToFinalMeasure"]
-    params: Dict[str, Any]
-
-
-class goToBeginningOfScoreAction(TypedDict):
-    action: Literal["goToBeginningOfScore"]
-    params: Dict[str, Any]
-
-
+@with_config(STRICT)
 class setTimeSignatureParams(TypedDict):
     numerator: int
     denominator: int
     measure: NotRequired[int]
 
 
-class setTimeSignatureAction(TypedDict):
-    action: Literal["setTimeSignature"]
-    params: setTimeSignatureParams
+@with_config(STRICT)
+class undoParams(TypedDict):
+    steps: NotRequired[int]
 
 
-class undoAction(TypedDict):
-    action: Literal["undo"]
-    params: Dict[str, Any]
+# --- Structure and expression ------------------------------------------------------
+
+@with_config(STRICT)
+class repeatParams(TypedDict):
+    startMeasure: int
+    endMeasure: int
+    times: NotRequired[int]
 
 
-class nextStaffAction(TypedDict):
-    action: Literal["nextStaff"]
-    params: Dict[str, Any]
+@with_config(STRICT)
+class removeRepeatParams(TypedDict):
+    startMeasure: int
+    endMeasure: int
 
 
-class prevStaffAction(TypedDict):
-    action: Literal["prevStaff"]
-    params: Dict[str, Any]
+@with_config(STRICT)
+class markerParams(TypedDict):
+    type: str
+    measure: int
 
 
-class structureEditAction(TypedDict):
-    """Round-2 editing actions; params use the camelCase names of the matching tool arguments
-    (e.g. addRepeat: startMeasure, endMeasure, times; addMarker: type, measure;
-    setKeySignature: fifths, measure, mode, staff; addGradualTempoChange: type, measure, endMeasure)."""
-    action: Literal["addRepeat", "removeRepeat", "addMarker", "addJump", "addRehearsalMark",
-                    "setKeySignature", "addGradualTempoChange", "removeMarking", "addSlur", "addHairpin",
-                    "addArticulation", "deleteMeasures", "copyMeasures"]
-    params: Dict[str, Any]
-
-
-class insertMeasuresParams(TypedDict):
+@with_config(STRICT)
+class rehearsalMarkParams(TypedDict):
+    text: str
     measure: NotRequired[int]
-    count: NotRequired[int]
+    tick: NotRequired[int]
 
 
-ActionSequence = List[
-    getScoreAction | addNoteAction | addRestAction | addTupletAction |
-    addLyricsAction | addDynamicAction | addFermataAction | setTempoAction |
-    addInstrumentAction | removeInstrumentAction | setStaffMuteAction |
-    setInstrumentSoundAction | appendMeasureAction | insertMeasureAction |
-    deleteSelectionAction | getCursorInfoAction | setCursorAction |
-    goToMeasureAction | nextElementAction | prevElementAction |
-    selectCurrentMeasureAction | selectCustomRangeAction | goToFinalMeasureAction |
-    goToBeginningOfScoreAction | setTimeSignatureAction |
-    undoAction | nextStaffAction | prevStaffAction | structureEditAction
+@with_config(STRICT)
+class setKeySignatureParams(TypedDict):
+    fifths: int
+    measure: NotRequired[int]
+    mode: NotRequired[Literal["major", "minor"]]
+    staff: NotRequired[int]
+
+
+@with_config(STRICT)
+class gradualTempoChangeParams(TypedDict):
+    type: str
+    measure: NotRequired[int]
+    tick: NotRequired[int]
+    endMeasure: NotRequired[int]
+    endTick: NotRequired[int]
+    targetBpm: NotRequired[float]
+    factor: NotRequired[float]
+    aTempo: NotRequired[bool]
+
+
+@with_config(STRICT)
+class removeMarkingParams(TypedDict):
+    kind: str
+    tick: NotRequired[int]
+    measure: NotRequired[int]
+    staff: NotRequired[int]
+
+
+@with_config(STRICT)
+class rangeParams(TypedDict):
+    startTick: NotRequired[int]
+    endTick: NotRequired[int]
+    startMeasure: NotRequired[int]
+    endMeasure: NotRequired[int]
+    staff: NotRequired[int]
+
+
+@with_config(STRICT)
+class typedRangeParams(rangeParams):
+    type: str
+
+
+@with_config(STRICT)
+class hairpinParams(rangeParams):
+    type: NotRequired[str]
+
+
+@with_config(STRICT)
+class deleteMeasuresParams(TypedDict):
+    startMeasure: int
+    endMeasure: NotRequired[int]
+
+
+@with_config(STRICT)
+class copyMeasuresParams(TypedDict):
+    startMeasure: int
+    endMeasure: NotRequired[int]
+    toMeasure: int
+    insert: NotRequired[bool]
+    staff: NotRequired[int]
+
+
+# action name -> (params type, params required). The plugin accepts exactly these
+# actions in processSequence, with exactly these params.
+SEQUENCE_ACTIONS = {
+    "getScore": (EmptyParams, False),
+    "addNote": (addNoteParams, True),
+    "addRest": (addRestParams, True),
+    "addTuplet": (addTupletParams, True),
+    "writeVoice": (writeVoiceParams, True),
+    "addLyrics": (addLyricsParams, True),
+    "appendMeasure": (countParams, False),
+    "insertMeasure": (insertMeasureParams, False),
+    "deleteSelection": (deleteSelectionParams, False),
+    "getCursorInfo": (EmptyParams, False),
+    "setCursor": (PositionParams, False),
+    "goToMeasure": (goToMeasureParams, True),
+    "goToBeginningOfScore": (StaffVoiceParams, False),
+    "goToFinalMeasure": (StaffVoiceParams, False),
+    "nextElement": (moveElementParams, False),
+    "prevElement": (moveElementParams, False),
+    "nextStaff": (countParams, False),
+    "prevStaff": (countParams, False),
+    "selectCurrentMeasure": (selectCurrentMeasureParams, False),
+    "selectCustomRange": (selectCustomRangeParams, True),
+    "setTimeSignature": (setTimeSignatureParams, True),
+    "setTempo": (setTempoParams, True),
+    "addDynamic": (addDynamicParams, True),
+    "addFermata": (PositionParams, False),
+    "addInstrument": (addInstrumentParams, True),
+    "removeInstrument": (removeInstrumentParams, False),
+    "setStaffMute": (setStaffMuteParams, True),
+    "setInstrumentSound": (setInstrumentSoundParams, True),
+    "undo": (undoParams, False),
+    "addRepeat": (repeatParams, True),
+    "removeRepeat": (removeRepeatParams, True),
+    "addMarker": (markerParams, True),
+    "addJump": (markerParams, True),
+    "addRehearsalMark": (rehearsalMarkParams, True),
+    "setKeySignature": (setKeySignatureParams, True),
+    "addGradualTempoChange": (gradualTempoChangeParams, True),
+    "removeMarking": (removeMarkingParams, True),
+    "addSlur": (rangeParams, False),
+    "addHairpin": (hairpinParams, False),
+    "addArticulation": (typedRangeParams, True),
+    "deleteMeasures": (deleteMeasuresParams, True),
+    "copyMeasures": (copyMeasuresParams, True),
+}
+
+SequenceStep = Annotated[
+    Union[tuple(_action(name, params, required) for name, (params, required) in SEQUENCE_ACTIONS.items())],
+    Field(discriminator="action"),
 ]
+
+ActionSequence = Annotated[List[SequenceStep], Field(min_length=1)]

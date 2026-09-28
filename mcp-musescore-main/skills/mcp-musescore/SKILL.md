@@ -11,7 +11,7 @@ Use this skill when a user asks to inspect, compose, edit, navigate, or analyze 
 
 ## Read the right detail
 
-- Read [references/tools.md](references/tools.md) before choosing a tool or constructing a batch sequence. It is the source of truth for the 50 public MCP tools, their parameters and defaults.
+- Read [references/tools.md](references/tools.md) before choosing a tool or constructing a batch sequence. It is the source of truth for the 51 public MCP tools, their parameters and defaults.
 - Read [references/architecture.md](references/architecture.md) when diagnosing connection, plugin, port, response-envelope, or MuseScore-version problems.
 - Read [references/client-configuration.md](references/client-configuration.md) when a client needs a stdio configuration.
 - Read [references/runtime.md](references/runtime.md) when installing, selecting a Python runtime, or using the repository's CLI helpers.
@@ -35,7 +35,7 @@ If a tool reports `Not connected to MuseScore`, do not retry mutations blindly: 
 1. Call `ping_musescore` to verify the bridge.
 2. Call `get_score` before editing so the current title, measures, staves, and score state are known.
 3. Use navigation and selection tools to place the cursor precisely.
-4. Use a direct mutation for one or two deliberate edits; use `processSequence` for a known batch.
+4. Write music with `write_voice`: a whole passage per staff and voice in one call and one undo step (durations like `"5/8"` are split and tied automatically; ties with `"tie": true`). Use `add_note`/`add_rest` only for one or two small corrections, and `processSequence` (with `atomic=true` for one undo step) for a known batch of other actions.
 5. Call `get_score` or a navigation tool after each mutation batch and report what was verified.
 6. Saving or exporting `.mscz`, PDF, or audio remains a MuseScore UI action unless another configured tool provides it.
 
@@ -47,6 +47,7 @@ If a tool reports `Not connected to MuseScore`, do not retry mutations blindly: 
 - Use `undo` when a just-made mutation is wrong and the score state is still safe to reverse.
 - Treat the JSON returned by the bridge as authoritative. The upstream README contains historical names such as `add_lyrics_to_current_note` and `set_title` that are not currently registered public MCP tools; do not call them unless the repository exposes them in a future version.
 - `processSequence` is camelCase because that is the registered Python tool name. Its inner `action` values are also camelCase QML actions; see the reference for the supported set.
+- Unknown arguments are errors. If a call fails because an argument doesn't exist, the feature doesn't exist: don't retry with a variant spelling, use the documented tools.
 
 ## Portability
 

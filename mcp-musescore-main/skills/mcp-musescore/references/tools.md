@@ -2,7 +2,11 @@
 
 This reference describes the tools currently registered by `server.py` and the JSON actions sent to the MuseScore QML plugin. Use the Python function names when calling MCP. Use the camelCase action names only inside `processSequence`.
 
-The server currently registers 50 public tools.
+The server currently registers 51 public tools.
+
+Arguments are strict: an unknown argument (e.g. `tie` on a tool that has no `tie`) or an unknown field inside an event or sequence step is an error, never silently ignored. The MuseScore plugin checks the same way (a per-action list of allowed params), so a raw WebSocket call can't slip an unsupported option through either.
+
+**To write music, use `write_voice`**: a whole passage (notes, chords, rests, ties) in one call and one undo step. `add_note` and `add_rest` are for small corrections.
 
 ## Positions: staff, voice, measure, tick
 
@@ -16,6 +20,16 @@ The plugin keeps its own write cursor: a tick (480 ticks per quarter note), a st
 | `tick` | Absolute tick. Takes precedence over `measure`. Must be the start of an existing note/rest. |
 
 Every result includes `cursor` (tick, measure, beat, staff, staffName, voice, element at the cursor). Clicking in MuseScore moves the cursor to the clicked note or selected range. Writing past the end of the score appends measures automatically.
+
+The plugin cursor (where the next write goes) and MuseScore's visible selection are kept apart: edits only move the plugin cursor, and the selection is moved to it once at the end of each call or batch, never after each note.
+
+## Durations and ties
+
+Durations are fractions of a whole note, as text `"1/4"` or as `{"numerator": 1, "denominator": 4}`: `"1/1"` whole, `"1/2"` half, `"1/4"` quarter, `"1/8"` eighth, `"3/8"` dotted quarter, `"7/16"` double-dotted quarter.
+
+MuseScore writes one plain, dotted or double-dotted value per note (and silently shortens anything else), so a duration that isn't one such value, or that crosses a barline, is **split and tied**: first at every barline, then greedily into the longest values that fit. `"5/8"` from a bar start becomes 1/2 tied to 1/8; `"9/32"` becomes 1/4 tied to 1/32; a half note starting on beat 4 of 4/4 becomes two tied quarters. The pieces always add up exactly to the requested duration, and the result lists every split (`split`). Rests are split the same way, without ties. Durations that need a tuplet (e.g. `"1/12"`) or are shorter than 1/128 are errors.
+
+A tie joins a note to the **next note of the same pitch in the same staff and voice**. It is made with MuseScore's own tie command after all notes of the call (or atomic batch) are written, and checked afterwards; if a tie can't be made exactly (no such next note, a rest follows, a repeat barline is in between), nothing from the call is kept and the error says why.
 
 ## Connection and score inspection
 
@@ -58,13 +72,14 @@ Section names (verse, chorus, bridge) and the key's mode are inferred; treat the
 
 ## Notes, rests, lyrics, and measures
 
-Duration values are JSON objects such as `{"numerator": 1, "denominator": 4}` for a quarter note. MIDI pitch 60 is middle C (C4); valid MIDI pitch values are 0-127. All tools in this table except the measure tools also take the position arguments.
+Durations are `"1/4"`-style fractions (or `{"numerator": 1, "denominator": 4}`); see "Durations and ties" above. MIDI pitch 60 is middle C (C4); valid MIDI pitch values are 0-127. All tools in this table except the measure tools also take the position arguments.
 
 | MCP tool | Parameters | What it does |
 |---|---|---|
-| `add_note` | `pitch: int = 64`, `duration`, `advance_cursor_after_action: bool = true`, `add_to_chord: bool = false` | Writes a note. `add_to_chord=true` adds the pitch to the chord just written (the cursor doesn't move). |
-| `add_rest` | `duration`, `advance_cursor_after_action: bool = true` | Writes a rest. |
-| `add_tuplet` | `duration` (total), `ratio = 3/2`, `advance_cursor_after_action: bool = false` | Creates a tuplet filled with rests; the cursor stays at its start so the next `add_note` calls (with the base duration, e.g. 1/8 for an eighth triplet) fill it. |
+| `write_voice` | `events: list`, position | Writes a passage into one staff and voice from the start position, in one call and **one undo step**; the view is updated once. Events: `{"pitches": [60], "duration": "1/8"}` note, `{"pitches": [48, 52, 55], "duration": "1/2"}` chord, `{"rest": true, "duration": "1/4"}` rest; `"tie": true` ties every pitch to the same pitch in the next event, `"tie": [60]` only the listed pitches. A tie on the last event ties into the note already written right after the passage. Overwrites what is there; appends bars if needed; an empty voice 1-3 (MuseScore's voices 2-4) is filled with rests. The cursor ends after the passage. Can't yet start inside a held note or overwrite tuplets. Result: `startTick`, `endTick`, `startMeasure`, `endMeasure`, `written`, `ties`, `split`, `warnings` (e.g. a held note after the passage was cut to a rest). |
+| `add_note` | `pitch: int = 64`, `duration = "1/4"`, `advance_cursor_after_action: bool = true`, `add_to_chord: bool = false`, `tie: bool = false` | Writes a note (split and tied if needed). `add_to_chord=true` adds the pitch to the chord just written (the cursor doesn't move; omit `duration`, or give the chord's own). `tie=true` ties it to the next note of the same pitch in the same voice, which must exist when the call ends (inside an atomic `processSequence`, when the sequence ends). |
+| `add_rest` | `duration = "1/4"`, `advance_cursor_after_action: bool = true` | Writes a rest (split if needed). |
+| `add_tuplet` | `duration` (total), `ratio = 3/2`, `advance_cursor_after_action: bool = false` | Creates a tuplet filled with rests; the cursor stays at its start so the next `add_note` calls (with the base duration, e.g. 1/8 for an eighth triplet) fill it. Inside a tuplet each note must be one plain or dotted value. |
 | `add_lyrics` | `lyrics: list[str]`, `verse: int = 0` | Adds syllables to consecutive notes. `"Hel-"` hyphenates to the next syllable; `"_"` skips a note; chords whose notes are all tied over are skipped (a chord where a new note starts still takes a syllable); an existing lyric in the same verse is replaced. |
 | `insert_measure` | `measure: int \| null` | Inserts an empty measure before the given (or the cursor's) measure. |
 | `append_measure` | `count: int = 1` | Appends measures to the end of the score. |
@@ -112,28 +127,35 @@ Voltas can't be added through the plugin API; add them from the palette or write
 
 | MCP tool | Parameters | What it does |
 |---|---|---|
-| `processSequence` | `sequence: list[object]` | Runs camelCase actions in order. Each step is its own undo step; the sequence stops at the first failing step and reports its index. |
+| `processSequence` | `sequence: list[object]`, `atomic: bool = false` | Runs camelCase actions in order in one round trip; every step is checked before any runs. Each step is its own undo step; the sequence stops at the first failing step and reports its index. With `atomic=true` the whole sequence is one undo step and nothing is kept if a step fails; `addNote` ties are made at the end, so the next note may come from a later step. Either way steps do no UI work: MuseScore's view is updated once, at the end. |
 
 The accepted inner actions are:
 
 ```text
-getScore, addNote, addRest, addTuplet, addLyrics, appendMeasure, insertMeasure,
-deleteSelection, getCursorInfo, setCursor, goToMeasure, goToBeginningOfScore,
-goToFinalMeasure, nextElement, prevElement, nextStaff, prevStaff,
-selectCurrentMeasure, selectCustomRange, setTimeSignature, setTempo,
+getScore, addNote, addRest, addTuplet, writeVoice, addLyrics, appendMeasure,
+insertMeasure, deleteSelection, getCursorInfo, setCursor, goToMeasure,
+goToBeginningOfScore, goToFinalMeasure, nextElement, prevElement, nextStaff,
+prevStaff, selectCurrentMeasure, selectCustomRange, setTimeSignature, setTempo,
 addDynamic, addFermata, addInstrument, removeInstrument, setStaffMute,
-setInstrumentSound, undo
+setInstrumentSound, undo, addRepeat, removeRepeat, addMarker, addJump,
+addRehearsalMark, setKeySignature, addGradualTempoChange, removeMarking,
+addSlur, addHairpin, addArticulation, deleteMeasures, copyMeasures
 ```
 
-Each action uses a `params` object with camelCase names. Example:
+Each action uses a `params` object with the camelCase names of the matching tool arguments (`writeVoice` takes `events` plus position, `addNote` takes `pitch`, `duration`, `tie`, `addToChord`, ...). Unknown params are errors. Example:
 
 ```json
 {
   "sequence": [
     {"action": "setCursor", "params": {"measure": 1, "staff": 2}},
-    {"action": "addNote", "params": {"pitch": 60, "duration": {"numerator": 1, "denominator": 4}}},
-    {"action": "addNote", "params": {"pitch": 64, "duration": {"numerator": 1, "denominator": 4}, "addToChord": true}},
-    {"action": "addRest", "params": {"duration": {"numerator": 1, "denominator": 4}}}
+    {"action": "writeVoice", "params": {"events": [
+      {"pitches": [60], "duration": "1/4", "tie": true},
+      {"pitches": [60], "duration": "1/8"},
+      {"pitches": [62], "duration": "1/8"},
+      {"rest": true, "duration": "1/2"}
+    ]}},
+    {"action": "addNote", "params": {"pitch": 64, "duration": "1/4", "measure": 2}},
+    {"action": "addNote", "params": {"pitch": 67, "addToChord": true}}
   ]
 }
 ```

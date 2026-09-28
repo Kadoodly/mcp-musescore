@@ -1,5 +1,7 @@
 # MuseScore MCP Server
 
+> Based on [ghchen99/mcp-musescore](https://github.com/ghchen99/mcp-musescore); the changes in this fork were written with AI assistance (see the [AI disclosure](../README.md#ai-disclosure)).
+
 A Model Context Protocol (MCP) server that lets AI assistants like Claude read, analyze, compose, arrange and edit the score open in MuseScore Studio 4, through a WebSocket plugin. Claude reads the score in a compact notation (`C4:q D4 [C4 E4 G4]:h~ ...`) and writes in the same notation, a whole passage or several staves per call, each call one undo step, while you keep working in MuseScore.
 
 ![Demo GIF](./assets/mcp-muse.gif)

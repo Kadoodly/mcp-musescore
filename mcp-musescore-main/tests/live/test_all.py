@@ -114,10 +114,18 @@ class AllFeatures:
         print(f"Score: {self.original_bars} bars, {self.staves} staves. Appending {self.bars_to_add} test bars.")
         await lv.tool("append_measure", count=self.bars_to_add)
         a = await lv.analysis(self.original_bars + 1)
+        meter = a["measures"][0]["timeSignature"]
+        if meter != "4/4":
+            # The appended bars take the last bar's meter; the tests are written
+            # in 4/4, so the test bars (only they) get a 4/4 time signature.
+            print(f"The score ends in {meter}: setting 4/4 on the test bars (from bar {self.original_bars + 1}).")
+            await lv.tool("set_time_signature", numerator=4, denominator=4, measure=self.original_bars + 1)
+            a = await lv.analysis(self.original_bars + 1)
         self.bars = {m["measure"]: (m["startTick"], m["endTick"]) for m in a["measures"]}
-        lengths = {e - s for s, e in self.bars.values()}
-        if lengths != {WHOLE}:
-            raise AssertionError("the last bar of the score must be in 4/4 for these tests (the appended bars take its meter)")
+        lengths = sorted({e - s for s, e in self.bars.values()})
+        if lengths != [WHOLE] or len(self.bars) != self.bars_to_add:
+            raise AssertionError(f"the test bars should be {self.bars_to_add} bars of 4/4 now, but they are {len(self.bars)} bars "
+                                 f"of {[f'{x}/1920' for x in lengths]}")
         self.next_bar = self.original_bars + 1
 
     def take(self, count=1):
@@ -336,7 +344,8 @@ class AllFeatures:
         assert f"bars {bar}" in changes and "mcp: writeVoice" in changes, changes
         detail = f"v{v0} -> v{v1}, stale expected_version refused"
         if self.interactive:
-            print(f"\n  >>> In MuseScore, change the note in bar {bar} (staff 1) to another pitch, then press Enter here.")
+            print(f"\n  >>> In MuseScore, click the note in bar {bar} on the top staff and press the Up arrow key "
+                  f"(another pitch), then press Enter here.")
             await asyncio.get_running_loop().run_in_executor(None, input)
             changes = await lv.tool("get_changes_since", version=v1)
             assert "user: edited in MuseScore" in changes and f"bars {bar}" in changes, changes

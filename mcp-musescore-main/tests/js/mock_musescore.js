@@ -367,7 +367,8 @@ class MockMuseScore {
                 return;
             }
             case Element.TIMESIG:
-                throw new Error('mock: time signature changes are not modelled');
+                this.setTimeSig(this.measureIndexAt(tick), el.timesig);
+                return;
             case Element.LAYOUT_BREAK:
             case Element.MARKER:
             case Element.JUMP:
@@ -379,6 +380,35 @@ class MockMuseScore {
                 el.tick = tick;
                 el.track = track;
                 this.state.anns.push(el);
+        }
+    }
+
+    // Score::cmdAddTimeSig, only for empty bars at the end of the score (what the live test does)
+    setTimeSig(mi, f) {
+        const ms = this.state.measures;
+        for (let i = mi; i < ms.length; i++) {
+            const m = ms[i];
+            for (const t in this.state.crs) {
+                const crs = this.trackCrs(+t).filter(c => c.tick >= m.tick && c.tick < m.tick + m.ticks);
+                if (crs.some(c => !c.rest || c.tick !== m.tick || c.actual !== m.ticks)) {
+                    throw new Error('mock: time signature changes are only modelled for empty bars at the end');
+                }
+            }
+            if (this.state.anns.some(a => a.tick >= m.tick) ) throw new Error('mock: time signature change over markings');
+        }
+        const num = f.numerator;
+        let pos = ms[mi].tick;
+        for (const t in this.state.crs) {
+            for (const c of this.trackCrs(+t).filter(x => x.tick >= pos)) this.removeCr(c);
+        }
+        for (let i = mi; i < ms.length; i++) {
+            const m = ms[i];
+            m.num = num;
+            m.den = f.denominator;
+            m.tick = pos;
+            m.ticks = WHOLE * num / f.denominator;
+            for (let s = 0; s < this.state.nstaves; s++) this.insertCr(this.newCr(s * VOICES, m.tick, m.ticks, m.ticks, null));
+            pos += m.ticks;
         }
     }
 

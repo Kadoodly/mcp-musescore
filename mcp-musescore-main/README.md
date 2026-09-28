@@ -111,6 +111,22 @@ For development, use the MCP development tools:
 mcp dev server.py
 ```
 
+Offline tests (no MuseScore needed; the plugin tests need [node](https://nodejs.org)):
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest            # Python logic, strict validation, and the plugin's JavaScript
+node syntax_check.js        # syntax check of the plugin (QML converted to JS, node --check)
+```
+
+The plugin's JavaScript is also run against a small mock of MuseScore's plugin API (`tests/js/`). That tests the plugin's own logic, not MuseScore: the live test does that. To run it, open a score saved as `mcp test` (a piano score, so there are two staves), start the plugin, and run:
+
+```bash
+python tests/live/test_step1.py            # keeps its bars so you can check them; --cleanup deletes them
+```
+
+It refuses to run unless every MuseScore window title contains "mcp test", only writes into bars it appends after the last bar, and checks that the original bars are unchanged. See the docstring of `tests/live/test_step1.py` for details.
+
 ### Viewing Console Output
 
 To see MuseScore plugin console output, run MuseScore from terminal:
@@ -145,6 +161,12 @@ The plugin keeps its own write cursor: a tick position (480 ticks per quarter no
 
 Clicking a note or selecting a range in MuseScore moves the cursor there. Measures are appended automatically when writing past the end of the score.
 
+The score and MuseScore's visible selection are kept apart: edits change the score and move the plugin cursor; the selection is moved to the cursor once, at the end of a call or batch, not after every note.
+
+### Strict arguments
+
+Unknown arguments are errors, at the MCP layer and inside the plugin (which has a list of allowed params per action). If Claude sends `tie=true` to a tool that has no `tie`, the call fails instead of silently doing something else.
+
 ### **Navigation & Cursor Control**
 - `get_cursor_info()` - Cursor position (measure, beat, tick, staff, voice) and the note/rest there
 - `set_cursor(measure, tick, staff, voice)` - Move the cursor; every argument optional
@@ -161,9 +183,12 @@ Clicking a note or selecting a range in MuseScore moves the cursor there. Measur
 
 ### **Note & Rest Creation**
 All of these accept optional `staff`, `voice`, `measure` and `tick`.
-- `add_note(pitch, duration, advance_cursor_after_action, add_to_chord)` - Add notes with MIDI pitch. Sequential notes write a melody; `add_to_chord=True` stacks a pitch on the chord just written.
+- `write_voice(events)` - **The main way to write music**: a whole passage of notes, chords, rests and ties in one staff and voice, in one call and one undo step. Events look like `{"pitches": [60], "duration": "1/8"}`, `{"pitches": [48, 52, 55], "duration": "1/2", "tie": true}` or `{"rest": true, "duration": "1/4"}`.
+- `add_note(pitch, duration, advance_cursor_after_action, add_to_chord, tie)` - Add a note with MIDI pitch, for small corrections. Sequential notes write a melody; `add_to_chord=True` stacks a pitch on the chord just written; `tie=True` ties it to the next note of the same pitch in that voice.
 - `add_rest(duration, advance_cursor_after_action)` - Add rests
 - `add_tuplet(duration, ratio)` - Create a tuplet; the cursor stays at its start so the next `add_note` calls fill it
+
+Durations are fractions of a whole note (`"1/4"`, `"3/8"`, ...). MuseScore only writes one plain, dotted or double-dotted value per note, so any other duration, or one crossing a barline, is split (at barlines first, then into the longest values that fit) and the pieces are tied: `"5/8"` becomes a half tied to an eighth. Nothing is shortened silently; durations that need a tuplet (`"1/12"`) are an error.
 
 ### **Markings**
 - `add_dynamic(dynamic)` - pp, p, mp, mf, f, ff, sfz, fp, …
@@ -210,7 +235,7 @@ These read the score and describe it musically, so Claude has reliable facts bef
 
 ### **Utilities**
 - `undo(steps)` - Undo like Ctrl+Z; the cursor returns to where it was
-- `processSequence(sequence, atomic)` - Execute multiple commands in batch; stops at the first failing step. With `atomic=True` the batch is one undo step and nothing is kept if a step fails
+- `processSequence(sequence, atomic)` - Execute multiple commands in batch; every step is checked first, and it stops at the first failing step. With `atomic=True` the batch is one undo step and nothing is kept if a step fails. The view is updated once at the end, not per step
 
 ## Sample Music
 
@@ -231,16 +256,25 @@ Each example includes:
 ```python
 await go_to_measure(1, staff=0)
 
-# Add notes (MIDI pitch: 60=C, 62=D, 64=E, etc.)
-await add_note(60, {"numerator": 1, "denominator": 4})  # Quarter note C
-await add_note(64, {"numerator": 1, "denominator": 4})  # Quarter note E
-await add_note(67, {"numerator": 1, "denominator": 4})  # Quarter note G
-await add_note(72, {"numerator": 1, "denominator": 4})  # Quarter note C
+# A melody in one call (MIDI pitch: 60=C, 62=D, 64=E, etc.), one undo step
+await write_voice([
+    {"pitches": [60], "duration": "1/4"},
+    {"pitches": [64], "duration": "1/4"},
+    {"pitches": [67], "duration": "1/4"},
+    {"pitches": [72], "duration": "1/4", "tie": True},   # tied over the barline
+    {"pitches": [72], "duration": "1/2"},
+    {"rest": True, "duration": "1/2"},
+], staff=0, voice=0, measure=1)
 
-# A C major chord on the second staff, measure 2
-await add_note(48, {"numerator": 1, "denominator": 1}, staff=1, measure=2)
-await add_note(52, add_to_chord=True)
-await add_note(55, add_to_chord=True)
+# Chords on the second staff
+await write_voice([
+    {"pitches": [48, 52, 55], "duration": "1/1"},
+    {"pitches": [43, 50, 53], "duration": "5/8"},        # written as 1/2 tied to 1/8
+    {"pitches": [48, 52, 55], "duration": "3/8"},
+], staff=1, measure=1)
+
+# A small correction
+await add_note(62, "1/4", measure=1)
 
 # Lyrics on the melody, dynamics and tempo
 await add_lyrics(["Do", "mi", "sol", "do"], staff=0, measure=1)
@@ -254,14 +288,15 @@ await set_tempo(96, "Moderato", measure=1)
 # Add multiple lyrics at once (a trailing "-" hyphenates to the next syllable)
 await add_lyrics(["Twin-", "kle", "twin-", "kle", "lit-", "tle", "star"])
 
-# Use sequence processing for complex operations
+# Use sequence processing for several operations in one round trip (atomic: one undo step)
 sequence = [
-    {"action": "setCursor", "params": {"measure": 1, "staff": 2}},
-    {"action": "addNote", "params": {"pitch": 60, "duration": {"numerator": 1, "denominator": 4}}},
-    {"action": "addNote", "params": {"pitch": 64, "duration": {"numerator": 1, "denominator": 4}}},
-    {"action": "addRest", "params": {"duration": {"numerator": 1, "denominator": 4}}}
+    {"action": "writeVoice", "params": {"measure": 1, "staff": 0, "events": [
+        {"pitches": [60], "duration": "1/2"}, {"pitches": [64], "duration": "1/2"}]}},
+    {"action": "writeVoice", "params": {"measure": 1, "staff": 1, "events": [
+        {"pitches": [48], "duration": "1/1"}]}},
+    {"action": "addDynamic", "params": {"dynamic": "mf", "staff": 0, "measure": 1}},
 ]
-await processSequence(sequence)
+await processSequence(sequence, atomic=True)
 ```
 
 ## Star History
@@ -299,7 +334,9 @@ await processSequence(sequence)
 - **`set_staff_mute`**: not reliable in MuseScore 4; use the mixer instead
 - **Voltas (1st/2nd endings)** and real rit./accel. lines can't be added through MuseScore 4.7's plugin API; add voltas from the palette. `add_tempo_change` writes the tempo change as hidden tempo marks instead
 - **Selection-based edits** (insert/delete bars, copy, slurs, hairpins, articulations) are MuseScore's own actions: each is its own undo step, and `copy_measures` uses the clipboard
-- **Selection**: write actions select the note/rest at the cursor so you can see where it is
+- **Selection**: write actions select the note/rest at the cursor (once per call or batch) so you can see where it is
+- **`write_voice`** can't yet start inside a held note or write over tuplets (use `add_tuplet` + `add_note` for tuplets); writing over part of a held note turns the rest of it into a rest (reported in `warnings`)
+- **Ties** are made with MuseScore's own tie command, so the note to tie to (same pitch, same voice, right after) must exist by the end of the call or atomic batch; ties can't cross a repeat barline. Making a tie leaves note-input mode
 
 ## File Structure
 
@@ -308,8 +345,11 @@ mcp-musescore/
 ├── .venv/
 ├── server.py                           # Python MCP server entry point
 ├── musescore-mcp-websocket.qml         # MuseScore plugin
+├── syntax_check.js                     # node syntax check of the plugin
 ├── requirements.txt
+├── requirements-dev.txt                # + pytest
 ├── README.md
+├── tests/                              # pytest; js/ = plugin tests on a mock API; live/ = against MuseScore
 └── src/                                # Source code modules
     ├── __init__.py
     ├── client/                         # WebSocket client functionality
@@ -326,8 +366,10 @@ mcp-musescore/
     ├── analysis/                       # Harmony, phrases, form, rhythm, tempo
     ├── types/                          # Type definitions
     │   ├── __init__.py
-    │   └── action_types.py             # WebSocket action type definitions
+    │   └── action_types.py             # WebSocket action type definitions (strict)
+    ├── validation.py                   # Strict tool arguments, write_voice events
     └── utils/
+        ├── durations.py                # Duration parsing and splitting into tied notes
         └── lilypond_converter.py       # Score JSON → LilyPond
 ```
 
@@ -340,9 +382,10 @@ Common MIDI pitch values for reference:
 
 ## Duration Reference
 
-Duration format: `{"numerator": int, "denominator": int}`
-- **Whole note**: `{"numerator": 1, "denominator": 1}`
-- **Half note**: `{"numerator": 1, "denominator": 2}`
-- **Quarter note**: `{"numerator": 1, "denominator": 4}`
-- **Eighth note**: `{"numerator": 1, "denominator": 8}`
-- **Dotted quarter**: `{"numerator": 3, "denominator": 8}`
+Duration format: `"numerator/denominator"` (or `{"numerator": int, "denominator": int}`)
+- **Whole note**: `"1/1"`
+- **Half note**: `"1/2"`
+- **Quarter note**: `"1/4"`
+- **Eighth note**: `"1/8"`
+- **Dotted quarter**: `"3/8"`; double-dotted quarter: `"7/16"`
+- **Anything else** (`"5/8"`, `"9/32"`, a note crossing a barline) is written as tied notes that add up exactly; `"1/12"` (a triplet value) is an error

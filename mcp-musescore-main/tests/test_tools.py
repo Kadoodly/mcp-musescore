@@ -3,6 +3,8 @@ sent to the plugin, and agreement with the plugin's per-action whitelist."""
 
 import asyncio
 import re
+import tempfile
+from pathlib import Path
 from typing import get_args
 
 import pytest
@@ -62,6 +64,10 @@ def all_args(tool):
         del args["notation"]
     if tool.name == "list_instruments":
         args = {"query": "violin"}
+    if tool.name == "open_score":                       # the path must exist
+        args["path"] = str(Path(__file__).resolve())
+    if tool.name == "export_score":                     # a folder that exists, a format MuseScore writes
+        args.update(path=str(Path(tempfile.mkdtemp()) / "out"), format="pdf")
     return args
 
 
@@ -73,10 +79,10 @@ def required_args(tool):
 def test_tool_count_and_every_tool_documented(server):
     app, _ = server
     names = [t.name for t in tools(app)]
-    assert len(names) == 71
+    assert len(names) == 70
     assert "write_voice" in names
     doc = TOOLS_MD.read_text(encoding="utf-8")
-    assert "currently registers 71 public tools" in doc
+    assert "currently registers 70 public tools" in doc
     missing = [n for n in names if f"`{n}`" not in doc]
     assert not missing, f"tools.md doesn't mention {missing}"
 

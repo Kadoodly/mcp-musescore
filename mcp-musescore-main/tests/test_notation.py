@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.notation import format_duration, note_name, parse_notation, parse_pitch, ticks_fraction
+from src.notation import articulation_name, format_duration, note_name, parse_notation, parse_pitch, ticks_fraction
 
 
 def test_parse_notes_chords_rests_and_carried_durations():
@@ -88,3 +88,18 @@ def test_formatting_helpers():
     assert note_name(66, 8) == "Gb4" and note_name(60, 26) == "B#3" and note_name(71, 7) == "Cb5"
     assert note_name(62, 14) == "D4"      # a spelling that doesn't fit the pitch is ignored
     assert parse_pitch("a#4", "p") == "A#4" and parse_pitch(60, "p") == 60 and parse_pitch("60", "p") == 60
+
+
+def test_lyric_verses():
+    assert parse_notation('C4:q("la" v2"lo")')[0]["lyric"] == ["la", "lo"]
+    assert parse_notation('C4:q(v3"x")')[0]["lyric"] == [None, None, "x"]
+    assert parse_notation('C4:q(v1"x")')[0]["lyric"] == "x"
+    with pytest.raises(ValueError, match="two lyrics for verse 2"):
+        parse_notation('C4:q(v2"x" v2"y")')
+
+
+def test_read_only_marks_are_refused_with_a_reason():
+    with pytest.raises(ValueError, match="read-only"):
+        parse_notation("C4:q(staccato !grace2)")
+    assert articulation_name("articStaccatoBelow") == "staccato"
+    assert articulation_name("Marcato tenuto above") == "!Marcato-tenuto-above"

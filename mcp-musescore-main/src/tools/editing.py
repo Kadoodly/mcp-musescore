@@ -4,6 +4,7 @@ layout and score-info tools."""
 from typing import Any, Dict, List, Literal, Optional
 
 from ..client import MuseScoreClient
+from ..local_files import export_target
 from ..types import Offset, SectionPart
 from ..validation import voice_events
 from .navigation import position_params, with_version
@@ -274,15 +275,22 @@ def setup_editing_tools(mcp, client: MuseScoreClient):
         return await client.send_command("setScoreInfo", params)
 
     @mcp.tool()
-    async def export_score(path: str, format: str = "pdf"):
-        """Export the open score to a file, e.g. to share or listen to it.
+    async def export_score(path: str, format: str = "pdf", overwrite: bool = False):
+        """Export the open score to a file, e.g. to share it or open it in another program. Only when
+        the user asks: it writes to their computer.
 
         Args:
-            path: File path on the computer running MuseScore, e.g. "C:/Users/me/Music/song". The
+            path: Full file path on the computer running MuseScore, e.g. "C:/Users/me/Music/song". The
                 extension is added if missing. The folder must exist.
-            format: pdf, png, svg, mid (MIDI), musicxml, mxl (compressed MusicXML), mp3, wav, ogg, flac,
-                mscz, mscx, brf. png and svg make one file per page (numbered)."""
-        return await client.send_command("exportScore", {"path": path, "format": format})
+            format: pdf, png, svg, mid (MIDI), musicxml, mxl (compressed MusicXML), mei, mscz, mscx.
+                png and svg make one file per page (name-1.png, ...) when there are several. Audio
+                (mp3, wav, ...) can't be exported from the plugin: the user uses File > Export.
+            overwrite: Replace an existing file (not for png/svg: use a new name)."""
+        target = export_target(path, format, overwrite)
+        res = await client.send_command("exportScore", {"path": path, "format": format.lower().lstrip(".")})
+        if isinstance(res, dict) and "error" not in res:
+            res["path"] = target
+        return res
 
     @mcp.tool()
     async def save_score():

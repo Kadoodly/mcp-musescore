@@ -22,11 +22,12 @@ import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from . import instruments
-from .notation import articulation_name, format_duration, note_name, ticks_fraction
+from .notation import articulation_name, format_duration, note_name, read_only_mark, ticks_fraction
 
 LEGEND = ("Notation: C4 = middle C, concert pitch; durations w=1/1 h=1/2 q=1/4 e=1/8 s=1/16 t=1/32, \".\" dotted; "
           "a duration carries over to the next notes until another is given; ~ = tied to the next note; "
-          "{3:2 ...} = tuplet; (...) = markings of that note; @3/8 = position in the bar as a fraction of a whole "
+          "{3:2 ...} = tuplet; (...) = markings of that note (!grace2, !name = read-only: grace notes and markings "
+          "that can't be written); @3/8 = position in the bar as a fraction of a whole "
           "note (the offset parameter). s1v1 = staff 1 voice 1. Staves missing from a bar have only rests there.")
 
 _METRONOME = re.compile(r"\s*[♩♪𝅗𝅥𝅝.]+\s*=\s*[\d.]+\s*$")
@@ -89,8 +90,8 @@ def _lyric_text(lyr: Dict[str, Any]) -> str:
     text = lyr.get("text", "")
     if lyr.get("syllabic") in ("begin", "middle"):
         text += "-"
-    verse = lyr.get("verse", 0) or 0
-    return (f"v{verse}" if verse else "") + _quote(text)
+    verse = lyr.get("verse", 0) or 0      # 0-based in MuseScore; v2"..." is the second verse
+    return (f"v{verse + 1}" if verse else "") + _quote(text)
 
 
 def _element_token(el: Dict[str, Any], duration: Optional[str], extra_marks: Sequence[str]) -> str:
@@ -100,7 +101,7 @@ def _element_token(el: Dict[str, Any], duration: Optional[str], extra_marks: Seq
     for lyr in sorted(el.get("lyrics", []) or [], key=lambda l: l.get("verse", 0) or 0):
         marks.append(_lyric_text(lyr))
     if el.get("graceNotes"):
-        marks.append(f"+{el['graceNotes']} grace")
+        marks.append(read_only_mark(f"grace{el['graceNotes']}"))
     dur = f":{duration}" if duration else ""
     if el.get("name") == "Rest":
         head, tie = "r", ""

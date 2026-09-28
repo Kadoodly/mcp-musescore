@@ -11,7 +11,7 @@
 'use strict';
 
 const assert = require('assert');
-const { MockMuseScore, WHOLE, Element, Tid, ClefType, LayoutBreak, DynamicType } = require('./mock_musescore.js');
+const { MockMuseScore, WHOLE, Element, Tid, ClefType, LayoutBreak, DynamicType, SymId, symName } = require('./mock_musescore.js');
 
 const Q = 480;   // quarter note in ticks
 
@@ -671,24 +671,45 @@ test('event markings: dynamic, articulations, fermata, lyric, text, chord symbol
     const at0 = ms.annotationsAt(0);
     assert.deepStrictEqual(at0.map(a => a.type).sort(), [Element.DYNAMIC, Element.EXPRESSION, Element.HARMONY].sort());
     assert.strictEqual(at0.find(a => a.type === Element.DYNAMIC).dynamicType, DynamicType.MF);
-    assert.deepStrictEqual(ms.crAt(0, 0).arts.map(a => a.symbol), ['articStaccatoAbove', 'articAccentAbove']);
+    // written above; MuseScore puts them below a low note (stem up)
+    assert.deepStrictEqual(ms.crAt(0, 0).arts.map(a => symName(a.symbol)), ['articStaccatoBelow', 'articAccentBelow']);
     assert.deepStrictEqual(ms.crAt(0, 0).lyrics.map(l => [l.text, l.syllabic]), [['Hel', 1]]);
     assert.deepStrictEqual(ms.crAt(0, Q).lyrics.map(l => [l.text, l.syllabic]), [['lo', 2]]);
     assert.deepStrictEqual(ms.crAt(0, 2 * Q).lyrics, []);
     assert.deepStrictEqual(ms.annotationsAt(3 * Q).map(a => a.type), [Element.FERMATA]);
     const bar = ok(ms.call('getScore', { startMeasure: 1, endMeasure: 1 })).analysis.measures[0];
-    assert.deepStrictEqual(bar.elements.staff0[0].articulations, ['articStaccatoAbove', 'articAccentAbove']);
+    // symbol names, not the translated display names ("Staccato below")
+    assert.deepStrictEqual(bar.elements.staff0[0].articulations, ['articStaccatoBelow', 'articAccentBelow']);
     assert.deepStrictEqual(bar.markings.map(m => m.type).sort(), ['chordSymbol', 'dynamic', 'fermata', 'text']);
     // writing a dynamic again replaces it
     ok(ms.call('writeVoice', { measure: 1, events: [{ pitches: [60], duration: '1/4', dynamic: 'pp' }] }));
     assert.deepStrictEqual(ms.annotationsAt(0).filter(a => a.type === Element.DYNAMIC).map(a => a.dynamicType), [DynamicType.PP]);
     ok(ms.call('writeVoice', { measure: 2, events: [{ pitches: [60], duration: '1/4', articulations: ['trill', 'up-bow', 'short-trill'] }] }));
-    assert.deepStrictEqual(ms.crAt(0, WHOLE).arts.map(a => [a.type, a.symbol]),
+    assert.deepStrictEqual(ms.crAt(0, WHOLE).arts.map(a => [a.type, symName(a.symbol)]),
                            [[Element.ORNAMENT, 'ornamentTrill'], [Element.ARTICULATION, 'stringsUpBow'], [Element.ORNAMENT, 'ornamentShortTrill']]);
+    // One the tools don't know (added in MuseScore): its display name
+    ms.userEdit(m => m.crAt(0, WHOLE).arts.push({ id: m.id(), type: Element.ARTICULATION, symbol: SymId.articMarcatoTenutoAbove }));
+    assert.deepStrictEqual(ok(ms.call('getScore', { startMeasure: 2, endMeasure: 2 })).analysis.measures[0].elements.staff0[0].articulations,
+                           ['ornamentTrill', 'stringsUpBow', 'ornamentShortTrill', 'Marcato tenuto above']);
     fails(ms.call('writeVoice', { measure: 2, events: [{ pitches: [60], duration: '1/4', dynamic: 'loud' }] }), /unknown dynamic 'loud'/);
     fails(ms.call('writeVoice', { measure: 2, events: [{ rest: true, duration: '1/4', articulations: ['staccato'] }] }), /a rest can only have a fermata/);
     fails(ms.call('writeVoice', { measure: 2, events: [{ pitches: [60], duration: '1/4', articulations: ['wobble'] }] }), /unknown articulation 'wobble'/);
     fails(ms.call('writeVoice', { measure: 2, events: [{ rest: true, duration: '1/4', lyric: 'la' }] }), /a rest can't have a lyric/);
+});
+
+test('lyrics of several verses: one per verse, each continuing its own words', () => {
+    const ms = fresh();
+    ok(ms.call('writeVoice', { measure: 1, events: [
+        { pitches: [60], duration: '1/4', lyric: ['Hel-', 'Good'] },
+        { pitches: [62], duration: '1/4', lyric: ['lo', null, 'three'] },
+        { pitches: [64], duration: '1/4', lyric: 'end' },
+    ] }));
+    const lyr = tick => ms.crAt(0, tick).lyrics.map(l => [l.verse, l.text, l.syllabic]).sort();
+    assert.deepStrictEqual(lyr(0), [[0, 'Hel', 1], [1, 'Good', 0]]);
+    assert.deepStrictEqual(lyr(Q), [[0, 'lo', 2], [2, 'three', 0]]);
+    assert.deepStrictEqual(lyr(2 * Q), [[0, 'end', 0]]);
+    fails(ms.call('writeVoice', { measure: 2, events: [{ pitches: [60], duration: '1/4', lyric: [null] }] }), /one per verse/);
+    fails(ms.call('writeVoice', { measure: 2, events: [{ pitches: [60], duration: '1/4', lyric: ['la', ''] }] }), /one per verse/);
 });
 
 test('tuplets inside writeVoice, with ties in and out', () => {
@@ -930,7 +951,8 @@ test('exportScore and saveScore', () => {
     assert.deepStrictEqual(ms.exports, [{ path: '/tmp/out/score', ext: 'pdf' }]);
     assert.strictEqual(ok(ms.call('exportScore', { path: 'C:/x/song.mid', format: '.mid' })).path, 'C:/x/song.mid');
     fails(ms.call('exportScore', { path: '/missing-folder/x', format: 'pdf' }), /could not export/);
-    fails(ms.call('exportScore', { path: '/tmp/x', format: 'p d f' }), /format must be an extension/);
+    fails(ms.call('exportScore', { path: '/tmp/x', format: 'p d f' }), /format must be one of/);
+    fails(ms.call('exportScore', { path: '/tmp/x', format: 'mp3' }), /audio: File > Export/);
     const v = ok(ms.call('getVersion')).version;
     ok(ms.call('saveScore'));
     assert.ok(ms.log.includes('file-save'));
@@ -944,6 +966,39 @@ test('setInstrumentName renames a part', () => {
     assert.deepStrictEqual([hdr.staves[0].instrument, hdr.staves[0].shortName], ['Violin I', 'Vln. I']);
     fails(ms.call('setInstrumentName', { staff: 0 }), /Give name and\/or shortName/);
     fails(ms.call('addInstrument', { instrumentId: 'flute', position: 5 }), /position must be an integer 0-1/);
+});
+
+test('instruments: added at a position (appended, then moved), replaced, removed, undone', () => {
+    const ms = fresh();
+    ok(ms.call('writeVoice', { measure: 1, staff: 1, voice: 0, events: [notes([48], '1/1')] }));
+    let r = ok(ms.call('addInstrument', { instrumentId: 'violin' }));
+    assert.deepStrictEqual([r.part.index, r.part.staves, r.part.instrumentId], [1, [2], 'violin']);
+    assert.strictEqual(r.undoSteps, undefined);
+    // insertPart would scramble the staves in 4.7.5 (the mock throws if it is used)
+    r = ok(ms.call('addInstrument', { instrumentId: 'flute', position: 0 }));
+    assert.deepStrictEqual([r.part.index, r.part.staves, r.part.instrumentId, r.undoSteps], [0, [0], 'flute', 2]);
+    let a = ok(ms.call('getScore', { startMeasure: 1, endMeasure: 1 })).analysis;
+    assert.deepStrictEqual(a.staves.map(st => [st.instrumentId, st.part]), [['flute', 0], ['piano', 1], ['piano', 1], ['violin', 2]]);
+    assert.deepStrictEqual(ms.brief(2 * 4, 0, WHOLE), '48:1920');         // the piano's left hand moved down with it
+    assert.deepStrictEqual(ms.state.clefs[2].map(c => c.type), [ClefType.F]);
+    // an unknown id: MuseScore adds a default instrument (warned)
+    r = ok(ms.call('addInstrument', { instrumentId: 'kazoo-xyz', position: 1 }));
+    assert.match(r.warning, /not found/);
+    ok(ms.call('undo', { steps: 2 }));
+    // an instrument with a position can't be in an atomic batch (two undo steps)
+    fails(ms.call('processSequence', { atomic: true, sequence: [{ action: 'addInstrument', params: { instrumentId: 'cello', position: 0 } }] }),
+          /atomic/);
+    ok(ms.call('processSequence', { atomic: true, sequence: [{ action: 'addInstrument', params: { instrumentId: 'cello' } }] }));
+    assert.deepStrictEqual(ms.state.parts.map(p => p.instrumentId), ['flute', 'piano', 'violin', 'cello']);
+    ok(ms.call('setInstrumentSound', { staff: 4, instrumentId: 'voice' }));
+    fails(ms.call('setInstrumentSound', { staff: 4, instrumentId: 'kazoo-xyz' }), /not found/);
+    ok(ms.call('removeInstrument', { staff: 1 }));
+    a = ok(ms.call('getScore', { startMeasure: 1, endMeasure: 1 })).analysis;
+    assert.deepStrictEqual(a.staves.map(st => st.instrumentId), ['flute', 'violin', 'voice']);
+    // undo: back to the piano with its music
+    ok(ms.call('undo', { steps: 6 }));
+    assert.deepStrictEqual(ms.state.parts.map(p => p.instrumentId), ['piano']);
+    assert.deepStrictEqual(ms.brief(1 * 4, 0, WHOLE), '48:1920');
 });
 
 test('openScore refuses while a score is open (MuseScore would open another window)', () => {
@@ -991,8 +1046,14 @@ test('checkScore finds bars whose voices do not add up', () => {
     const ms = fresh();
     assert.strictEqual(ok(ms.call('checkScore')).ok, true);
     ms.removeCr(ms.crAt(4, WHOLE));
-    const r = ok(ms.call('checkScore'));
-    assert.deepStrictEqual([r.ok, r.corrupted], [false, [{ measure: 2, staff: 1 }]]);
+    ms.insertCr(ms.newCr(1, 2 * WHOLE, 3 * WHOLE, 3 * WHOLE, 60));       // a voice 2 note longer than bar 3
+    let r = ok(ms.call('checkScore'));
+    assert.deepStrictEqual([r.ok, r.corrupted], [false, [
+        { measure: 2, staff: 1, voice: 0, problem: 'incomplete', found: '0/1', expected: '1/1' },
+        { measure: 3, staff: 0, voice: 1, problem: 'too long', found: '3/1', expected: '1/1' }]]);
+    r = ok(ms.call('checkScore', { startMeasure: 3, endMeasure: 4 }));
+    assert.deepStrictEqual(r.corrupted.map(c => c.measure), [3]);
+    fails(ms.call('checkScore', { startMeasure: 3, endMeasure: 2 }), /endMeasure/);
 });
 
 test('voices 2-4: cleared rests become gaps, and are not reported as rests', () => {

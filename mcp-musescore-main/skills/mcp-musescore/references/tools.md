@@ -2,7 +2,7 @@
 
 This reference describes the tools registered by `server.py` and the JSON actions sent to the MuseScore QML plugin. Use the Python (snake_case) tool names when calling MCP; the camelCase action names only appear inside `process_sequence`.
 
-The server currently registers 71 public tools.
+The server currently registers 70 public tools.
 
 Arguments are strict: an unknown argument (e.g. `tie` on a tool that has no `tie`) or an unknown field inside an event, part or sequence step is an error, never silently ignored. The MuseScore plugin checks the same way (a per-action list of allowed params), so a raw WebSocket call can't slip an unsupported option through either.
 
@@ -34,10 +34,10 @@ bars 3-4: rests
 | Duration | After `:`. Letters `w` 1/1, `h` 1/2, `q` 1/4, `e` 1/8, `s` 1/16, `t` 1/32, `x` 1/64 (`b` 2/1) with `.` or `..` for dotted values (`q.` = 3/8), or a fraction (`3/8`, `5/8`). **A duration carries over** to the following notes until another is given. |
 | Tie | `~` after a note or chord ties it to the next one (`C4:h~ C4:q`); inside a chord only the marked pitches are tied (`[C4~ E4]:h`). |
 | Tuplet | `{3:2 C4:e D4 E4}` = three eighths in the time of two. The notes must add up to 3 × one note value. |
-| Markings | In parentheses right after a note or rest: a dynamic (`mf`, `sfz`, ...), articulations (`staccato` `staccatissimo` `tenuto` `accent` `marcato` `portato` `accent-staccato` `marcato-staccato` `stress` `unstress`; short forms `stacc` `ten` `acc` `marc` `>` `^` `-` `.`), ornaments (`trill` `mordent` `short-trill` `turn` `inverted-turn`), `up-bow` `down-bow` `harmonic` `snap-pizzicato` `open` `stopped`, `fermata`, a lyric syllable in quotes (`"Hel-"` continues the word on the next note, `"_"` leaves a note without one), `text="dolce"` (expression text), `chord=Cmaj7` (chord symbol). A rest can only take `fermata` (and `text=`, `chord=`, a dynamic). |
+| Markings | In parentheses right after a note or rest: a dynamic (`mf`, `sfz`, ...), articulations (`staccato` `staccatissimo` `tenuto` `accent` `marcato` `portato` `accent-staccato` `marcato-staccato` `stress` `unstress`; short forms `stacc` `ten` `acc` `marc` `>` `^` `-` `.`), ornaments (`trill` `mordent` `short-trill` `turn` `inverted-turn`), `up-bow` `down-bow` `harmonic` `snap-pizzicato` `open` `stopped`, `fermata`, a lyric syllable in quotes (`"Hel-"` continues the word on the next note, `"_"` leaves a note without one; other verses `v2"Good"`, `v3"..."`, each continuing its own words), `text="dolce"` (expression text), `chord=Cmaj7` (chord symbol). A rest can only take `fermata` (and `text=`, `chord=`, a dynamic). |
 | Bar lines | `\|` is optional. When given, the bars between two `\|` must all have the same length (a check against miscounting). |
 
-In the compact view: `s1:` is staff 1 voice 0, `s1v1:` staff 1 voice 1. Staves with only rests in a bar are left out. `@3/8` is a position in the bar as a fraction of a whole note (the same unit as the `offset` argument): inside a voice line it means the next note starts there (the voice is empty before it; when writing, use a rest or start at that offset instead); in `marks:` lines it places markings that are not on a note, and lines such as slurs (`slur s0@1/4-bar 3@1/2`). A bar with the same music as an earlier listed bar is shown as `bar 9 = bar 1` (runs: `bars 9-12 = bars 1-4`); runs of empty bars as `bars 5-8: rests`. The bar header shows time signature changes, `|:` / `:|` repeats, markers and jumps, rehearsal marks `[A]`, key and clef changes, and visible tempo marks. Grace notes are reported (`+2 grace`) but can't be written.
+In the compact view: `s1:` is staff 1 voice 0, `s1v1:` staff 1 voice 1. Staves with only rests in a bar are left out. `@3/8` is a position in the bar as a fraction of a whole note (the same unit as the `offset` argument): inside a voice line it means the next note starts there (the voice is empty before it; when writing, use a rest or start at that offset instead); in `marks:` lines it places markings that are not on a note, and lines such as slurs (`slur s0@1/4-bar 3@1/2`). A bar with the same music as an earlier listed bar is shown as `bar 9 = bar 1` (runs: `bars 9-12 = bars 1-4`); runs of empty bars as `bars 5-8: rests`. The bar header shows time signature changes, `|:` / `:|` repeats, markers and jumps, rehearsal marks `[A]`, key and clef changes, and visible tempo marks. Read-only marks start with `!`: grace notes (`!grace2`) and articulations the tools can't write (MuseScore's name for them, e.g. `!Marcato-tenuto-above`). They can't be written: leave them out when writing a line back (writing over that note replaces it without them).
 
 ## Positions: staff, voice, measure, offset, tick
 
@@ -75,9 +75,9 @@ Every change to the score raises its version: your edits and the user's edits in
 | `get_version` | none | The current version. |
 | `get_changes_since` | `version*`, `show_music = true` | The changes since a version (who, which action, which bars) and the music of the changed bars now. Says so when the log can't cover that version (too old, another plugin run, another score opened): read the score again. |
 | `get_selection` | `show_music = true` | What is selected in MuseScore: a range (bars, staves, with its music) or elements (type, tick, bar, staff, voice, pitch). `fromUser` is false when the selection only shows the plugin's cursor. |
-| `check_score` | none | Bars whose voices don't add up (corrupted), per staff. |
+| `check_score` | `start_measure`, `end_measure` | Bars whose voices don't add up (voice 1 must fill the bar, voices 2-4 must not be longer): bar, staff, voice, found and expected length. Computed from the notes now (MuseScore's own flag is only set when a file is opened). |
 | `list_instruments` | `query`, `group`, `instrument_id` | MuseScore 4.7.5's instruments: id (for `add_instrument`), name, clef(s), transposition, comfortable and full range (sounding MIDI pitches). With `instrument_id`: details and, for drum kits, the drum map (MIDI pitch → drum, voice). |
-| `open_score` | `path*` | Opens a file (mscz, MusicXML, MIDI, ...) when no score is open. With a score open it is refused: MuseScore 4 would open the file in a new window, which the plugin can't reach. |
+| `open_score` | `path*` | Opens a file (full path, must exist: mscz, MusicXML, MIDI, ...) when no score is open. With a score open it is refused: MuseScore 4 would open the file in a new window, which the plugin can't reach. |
 | `connect_to_musescore` | none | Opens the WebSocket connection to `ws://localhost:8765`. |
 | `ping_musescore` | none | A healthy plugin answers `"pong"`. |
 
@@ -100,7 +100,7 @@ Section names and the key's mode are inferred; treat them as informed guesses.
 
 | MCP tool | Parameters | What it does |
 |---|---|---|
-| `write_voice` | `notation` or `events`, position, `expected_version` | Writes a passage into one staff and voice from the start position, in one call and **one undo step**. Events: `{"pitches": [60], "duration": "1/8"}`, `{"pitches": ["C4", "E4", "G4"], "duration": "1/2"}`, `{"rest": true, "duration": "1/4"}`, `"tie": true` or `"tie": [60]`, `{"tuplet": "3:2", "events": [...]}`, markings `"dynamic"`, `"articulations"`, `"lyric"`, `"text"`, `"chord"`. A tie on the last note ties into the note already written right after the passage. Result: `startTick`, `endTick`, `startMeasure`, `endMeasure`, `written`, `ties`, `split`, `warnings`. The cursor ends after the passage. |
+| `write_voice` | `notation` or `events`, position, `expected_version` | Writes a passage into one staff and voice from the start position, in one call and **one undo step**. Events: `{"pitches": [60], "duration": "1/8"}`, `{"pitches": ["C4", "E4", "G4"], "duration": "1/2"}`, `{"rest": true, "duration": "1/4"}`, `"tie": true` or `"tie": [60]`, `{"tuplet": "3:2", "events": [...]}`, markings `"dynamic"`, `"articulations"`, `"lyric"` (a syllable, or one per verse: `["la", null, "lo"]`), `"text"`, `"chord"`. A tie on the last note ties into the note already written right after the passage. Result: `startTick`, `endTick`, `startMeasure`, `endMeasure`, `written`, `ties`, `split`, `warnings`. The cursor ends after the passage. |
 | `replace_section` | `start_measure*`, `parts*`, `end_measure`, `clear_other_voices = true`, `expected_version` | New music for whole bars, any number of staves and voices, one undo step. Each part: `{"staff": 0, "voice": 0, "notation": "..."}` (or `events`), filling the bars exactly. Other voices of those staves are cleared unless `clear_other_voices` is false; other staves are untouched. `start_measure` may be (number of bars + 1): the bars are appended. |
 | `add_note` | `pitch = 64` (MIDI or name), `duration = "1/4"`, `advance_cursor_after_action = true`, `add_to_chord = false`, `tie = false`, position, `expected_version` | One note (split and tied if needed). `add_to_chord=true` adds the pitch to the chord just written (omit `duration`). `tie=true` ties it to the next note of the same pitch, which must exist when the call ends (in an atomic sequence: when the sequence ends). |
 | `add_rest` | `duration = "1/4"`, `advance_cursor_after_action = true`, position, `expected_version` | One rest (split if needed). |
@@ -152,12 +152,11 @@ Voltas and pedal lines can't be added through the plugin API.
 | MCP tool | Parameters | What it does |
 |---|---|---|
 | `set_score_info` | `title`, `subtitle`, `composer`, `lyricist` | The texts at the top of the first page (replacing what is there) and the score properties. Undo restores the texts, not the file properties. |
-| `add_instrument` | `instrument_id*`, `position` | Adds an instrument (part) at the bottom or at a part index. |
+| `add_instrument` | `instrument_id*`, `position` | Adds an instrument (part) at the bottom, or at a part index: it is added at the bottom and moved there, as the Instruments panel moves one (two undo steps, `undoSteps: 2`; not in an atomic batch). An unknown id gets a default instrument and a `warning`. |
 | `set_instrument_name` | `name`, `short_name`, `staff` or `part` | Renames a part ("Violin I" / "Vln. I"). |
 | `remove_instrument` | `part` or `staff` | Removes a whole part (not the only one). |
 | `set_instrument_sound` | `staff*`, `instrument_id*` | Replaces the instrument of the staff's part. |
-| `set_staff_mute` | `staff*`, `mute*` | Not reliable in MuseScore 4; prefer the mixer. |
-| `export_score` | `path*`, `format = pdf` | pdf, png, svg, mid, musicxml, mxl, mp3, wav, ogg, flac, mscz, ... to a path on the computer running MuseScore (the folder must exist). |
+| `export_score` | `path*`, `format = pdf`, `overwrite = false` | pdf, png, svg, mid, musicxml, mxl, mei, mscz, mscx to a full path on the computer running MuseScore (the folder must exist; `.ext` is added). png/svg write one file per page (`name-1.png`, ...) and refuse names whose files exist; other formats refuse an existing file unless `overwrite`. Audio (mp3, wav, ...) can't be exported from the plugin: ask the user to use File → Export. Only when the user asks. |
 | `save_score` | none | Like Ctrl+S (a never-saved score opens the Save dialog). |
 
 ## Navigation and selection (low level)

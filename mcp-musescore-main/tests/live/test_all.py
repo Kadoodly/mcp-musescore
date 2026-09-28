@@ -40,7 +40,6 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import sys
 import tempfile
 import time
@@ -54,7 +53,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from test_step1 import Live, ToolFailed, check_window_title  # noqa: E402
+from test_step1 import Live, check_window_title  # noqa: E402
 
 from src.notation import parse_notation, pitch_midi  # noqa: E402
 from src.validation import normalize_voice_events  # noqa: E402
@@ -129,6 +128,11 @@ class AllFeatures:
             a = await lv.analysis(self.original_bars + 1)
             # MuseScore re-bars the (empty) test bars: same total length, other bar count
             print(f"  MuseScore re-barred them into {len(a['measures'])} bars of 4/4.")
+            missing = self.bars_to_add - len(a["measures"])
+            if missing > 0:      # e.g. 3/4 -> fewer bars of 4/4: add 4/4 bars up to the count asked for
+                await lv.tool("append_measure", count=missing)
+                a = await lv.analysis(self.original_bars + 1)
+                print(f"  Appended {missing} more: {len(a['measures'])} test bars.")
         self.bars = {m["measure"]: (m["startTick"], m["endTick"]) for m in a["measures"]}
         lengths = sorted({e - s for s, e in self.bars.values()})
         if lengths != [WHOLE]:
@@ -169,6 +173,7 @@ class AllFeatures:
             "Cb5:q B#3 E#4 Fb4",
             "C5:q(trill) D5(up-bow down-bow) E5(turn short-trill) F5(mordent accent-staccato)",
             "C4:e. D4:s E4:e.. F4:t G4:h(p tenuto portato)",
+            'C4:q("Hel-" v2"Good") D4("lo" v3"three") E4(v2"night") F4(staccato)',
         ]
         mismatches = []
         for music in passages:
@@ -369,7 +374,8 @@ class AllFeatures:
         sel = await lv.tool("get_selection")
         assert sel["kind"] == "range" and sel["startMeasure"] == bar and sel["endMeasure"] == bar, sel
         assert "G4:h A4" in sel.get("music", ""), sel
-        check = await lv.tool("check_score")
+        check = await lv.tool("check_score", start_measure=self.original_bars + 1,
+                              end_measure=self.original_bars + self.bars_to_add)
         assert check["ok"], check
         return f"selection bar {sel['startMeasure']}, fromUser={sel['fromUser']}; no corrupted bars"
 
@@ -387,7 +393,8 @@ class AllFeatures:
         return ", ".join(made)
 
     async def test_open_score_refused(self):
-        await self.live.expect_error(self.live.tool("open_score", path=str(ROOT / "examples" / "x.mscz")), "already open")
+        example = ROOT / "examples" / "string quartet" / "String Quartet.mscz"
+        await self.live.expect_error(self.live.tool("open_score", path=str(example)), "already open")
         return "refused while a score is open"
 
     # --- whole-score tools (--global) --------------------------------------------------
@@ -407,17 +414,34 @@ class AllFeatures:
         if not self.global_tools:
             return "SKIP: run with --global"
         lv = self.live
-        before = (await lv.analysis(1, 1))["numStaves"]
+        bar = self.take()
+        await lv.tool("write_voice", notation="C4:q D4 E4 F4", measure=bar, staff=0, voice=0)
+        a = await lv.analysis(1, 1)
+        before, first_id = a["numStaves"], a["staves"][0]["instrumentId"]
+        # appended, then moved to the top in a second undo step
         res = await lv.tool("add_instrument", instrument_id="flute", position=0)
-        staff = res["part"]["staves"][0]
+        try:
+            assert res["part"]["staves"] == [0] and res.get("undoSteps") == 2, res
+            a = await lv.analysis(1, 1)
+            assert a["numStaves"] == before + 1, a["numStaves"]
+            assert [a["staves"][0]["instrumentId"], a["staves"][1]["instrumentId"]] == ["flute", first_id], a["staves"][:2]
+            # the music moved down with its staff
+            line = bar_lines(await self.view(bar, staves=[1]), bar).get("s1", "")
+            assert line == "C4:q D4 E4 F4", f"staff 1 of bar {bar} after inserting at the top: {line!r}"
+            await lv.tool("set_instrument_name", staff=0, name="Flute I", short_name="Fl. I")
+            a = await lv.analysis(1, 1)
+            assert a["staves"][0]["instrument"] == "Flute I", a["staves"][0]
+        finally:
+            # take the flute out again whatever happened (the original bars must end as they began)
+            a = await lv.analysis(1, 1)
+            flutes = [s["index"] for s in a["staves"] if s["instrumentId"] == "flute"]
+            if a["numStaves"] > before and flutes:
+                await lv.tool("remove_instrument", staff=flutes[0])
         a = await lv.analysis(1, 1)
-        assert a["numStaves"] == before + 1 and a["staves"][0]["instrumentId"] == "flute", a["staves"][0]
-        await lv.tool("set_instrument_name", staff=0, name="Flute I", short_name="Fl. I")
-        a = await lv.analysis(1, 1)
-        assert a["staves"][0]["instrument"] == "Flute I", a["staves"][0]
-        await lv.tool("remove_instrument", staff=staff)
-        assert (await lv.analysis(1, 1))["numStaves"] == before
-        return "flute inserted at the top, renamed, removed"
+        assert a["numStaves"] == before and a["staves"][0]["instrumentId"] == first_id, a["staves"][0]
+        line = bar_lines(await self.view(bar, staves=[0]), bar).get("s0", "")
+        assert line == "C4:q D4 E4 F4", f"staff 0 of bar {bar} after removing the flute: {line!r}"
+        return "flute inserted at the top (music moved down with its staves), renamed, removed"
 
     async def test_global_system_locks(self):
         if not self.global_tools:
@@ -469,7 +493,7 @@ class AllFeatures:
             try:
                 detail = await getattr(self, name)()
                 status = "SKIP" if str(detail).startswith("SKIP") else "PASS"
-            except (AssertionError, ToolFailed, KeyError) as e:
+            except Exception as e:      # one surprise must not stop the other checks
                 failed += 1
                 status, detail = "FAIL", f"{type(e).__name__}: {e}"
             print(f"{status}  {name}: {detail}")

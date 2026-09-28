@@ -173,12 +173,13 @@ class Live:
         self.results = []
         self.last_call = None
 
-    async def tool(self, name, **args):
-        """Calls an MCP tool as Claude would; returns its dict result or raises ToolFailed."""
+    async def tool(self, tool_name, /, **args):
+        """Calls an MCP tool as Claude would; returns its dict result or raises ToolFailed.
+        (tool_name is positional-only: some tools have an argument called name.)"""
         shown = ", ".join(f"{k}={v!r}"[:80] for k, v in args.items())
-        self.last_call = f"{name}({shown})"
+        self.last_call = f"{tool_name}({shown})"
         try:
-            out = await self.server.mcp.call_tool(name, args)
+            out = await self.server.mcp.call_tool(tool_name, args)
         except self.ToolError as e:
             raise ToolFailed(str(e)) from None
         if isinstance(out, tuple):

@@ -10,7 +10,7 @@ The only additions are PYTHON_ONLY_PARAMS, which the server turns into plugin
 params before sending (notation text becomes events).
 """
 
-from typing import Annotated, List, Literal, Union
+from typing import Annotated, List, Literal, Optional, Union
 
 from pydantic import ConfigDict, Field, with_config
 from typing_extensions import NotRequired, TypedDict
@@ -41,7 +41,13 @@ PitchName = Annotated[str, Field(pattern=NOTE_NAME_PATTERN, description='Note na
 Pitch = Union[MidiPitch, PitchName]
 Dynamic = Annotated[str, Field(description="ppp, pp, p, mp, mf, f, ff, fff, fp, sf, sfz, sffz, fz, rf, rfz, ...")]
 Articulation = Annotated[str, Field(description="staccato, staccatissimo, tenuto, accent, marcato, portato, "
-                                                "accent-staccato, marcato-staccato, stress, unstress, fermata")]
+                                                "accent-staccato, marcato-staccato, stress, unstress, up-bow, down-bow, "
+                                                "harmonic, snap-pizzicato, open, stopped, trill, mordent, short-trill, "
+                                                "turn, inverted-turn, fermata")]
+
+
+Lyric = Annotated[Union[str, List[Optional[str]]], Field(
+    description='The syllable ("la", "Hel-" continues a word, "_" extends a melisma); or one per verse: ["la", null, "lo"]')]
 
 
 @with_config(STRICT)
@@ -53,7 +59,7 @@ class TupletNote(TypedDict):
     tie: NotRequired[Union[bool, List[Pitch]]]
     dynamic: NotRequired[Dynamic]
     articulations: NotRequired[List[Articulation]]
-    lyric: NotRequired[str]
+    lyric: NotRequired[Lyric]
     text: NotRequired[str]
     chord: NotRequired[str]
 
@@ -69,7 +75,7 @@ class VoiceEvent(TypedDict):
     tie: NotRequired[Union[bool, List[Pitch]]]
     dynamic: NotRequired[Dynamic]
     articulations: NotRequired[List[Articulation]]
-    lyric: NotRequired[str]
+    lyric: NotRequired[Lyric]
     text: NotRequired[str]
     chord: NotRequired[str]
     tuplet: NotRequired[Annotated[str, Field(pattern=r"^\s*\d+\s*:\s*\d+\s*$", description='"3:2" = 3 notes in the time of 2')]]
@@ -179,12 +185,6 @@ class setInstrumentNameParams(TypedDict):
 class removeInstrumentParams(TypedDict):
     part: NotRequired[int]
     staff: NotRequired[int]
-
-
-@with_config(STRICT)
-class setStaffMuteParams(TypedDict):
-    staff: int
-    mute: bool
 
 
 @with_config(STRICT)
@@ -467,7 +467,6 @@ SEQUENCE_ACTIONS = {
     "addFermata": (PositionParams, False),
     "addInstrument": (addInstrumentParams, True),
     "removeInstrument": (removeInstrumentParams, False),
-    "setStaffMute": (setStaffMuteParams, True),
     "setInstrumentSound": (setInstrumentSoundParams, True),
     "setInstrumentName": (setInstrumentNameParams, True),
     "undo": (stepsParams, False),

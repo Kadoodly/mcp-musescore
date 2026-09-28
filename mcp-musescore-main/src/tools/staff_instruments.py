@@ -63,19 +63,6 @@ def setup_staff_instruments_tools(mcp, client: MuseScoreClient):
         return await client.send_command("removeInstrument", params)
 
     @mcp.tool()
-    async def set_staff_mute(staff: int, mute: bool):
-        """Mute or unmute a staff.
-
-        Args:
-            staff: Staff number (0-based)
-            mute: True to mute, False to unmute
-        """
-        return await client.send_command("setStaffMute", {
-            "staff": staff,
-            "mute": mute
-        })
-
-    @mcp.tool()
     async def set_instrument_sound(staff: int, instrument_id: str):
         """Replace the instrument of the part containing a staff (e.g. turn a violin into a viola).
 

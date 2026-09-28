@@ -44,12 +44,37 @@ const ClefType = {
     C4: 11, C5: 12, F: 20, F15_MB: 21, F8_VB: 22, F_8VA: 23, F_15MA: 24, F_B: 25, F_C: 26, PERC: 29, PERC2: 30, TAB: 31,
 };
 const LayoutBreak = { PAGE: 0, LINE: 1, SECTION: 2, NOBREAK: 3 };
+// A few of MuseScore's instrument templates (id -> name, short name, clefs of its staves)
+const MOCK_INSTRUMENTS = {};
+[['piano', 'Piano', 'Pno.', ['G', 'F']], ['flute', 'Flute', 'Fl.', ['G']], ['violin', 'Violin', 'Vln.', ['G']],
+ ['cello', 'Violoncello', 'Vc.', ['F']], ['voice', 'Voice', 'Vo.', ['G']]]
+    .forEach(([id, name, short, clefs]) => { MOCK_INSTRUMENTS[id] = { id, name, short, clefs }; });
 const DynamicType = {};
 ['OTHER', 'PPPPPP', 'PPPPP', 'PPPP', 'PPP', 'PP', 'P', 'MP', 'MF', 'F', 'FF', 'FFF', 'FFFF', 'FFFFF', 'FFFFFF', 'FP', 'PF',
  'SF', 'SFZ', 'SFF', 'SFFZ', 'SFFF', 'SFFFZ', 'SFP', 'SFPP', 'RFZ', 'RF', 'FZ', 'M', 'R', 'S', 'Z', 'N']
     .forEach((k, i) => { DynamicType[k] = i; });
-// SymId.<name> is a number in MuseScore; here it is the name, so tests can read it back.
-const SymId = new Proxy({}, { get: (t, k) => (typeof k === 'string' ? k : undefined) });
+// SymId is MuseScore's name -> number map (a QQmlPropertyMap of the enum). The mock
+// knows the names checked in the 4.7.5 source (api/v1/apitypes.h); others are
+// undefined, as in MuseScore. symName() turns a number back into its name.
+const SYM_NAMES = [
+    'noSym', 'articStaccatoAbove', 'articStaccatoBelow', 'articStaccatissimoAbove', 'articStaccatissimoBelow',
+    'articTenutoAbove', 'articTenutoBelow', 'articAccentAbove', 'articAccentBelow', 'articMarcatoAbove', 'articMarcatoBelow',
+    'articTenutoStaccatoAbove', 'articTenutoStaccatoBelow', 'articAccentStaccatoAbove', 'articAccentStaccatoBelow',
+    'articMarcatoStaccatoAbove', 'articMarcatoStaccatoBelow', 'articStressAbove', 'articStressBelow',
+    'articUnstressAbove', 'articUnstressBelow', 'articMarcatoTenutoAbove', 'articMarcatoTenutoBelow',
+    'stringsUpBow', 'stringsDownBow', 'stringsHarmonic', 'pluckedSnapPizzicatoAbove', 'pluckedSnapPizzicatoBelow',
+    'brassMuteOpen', 'brassMuteClosed', 'ornamentTrill', 'ornamentMordent', 'ornamentShortTrill', 'ornamentTurn',
+    'ornamentTurnInverted',
+];
+const SymId = {};
+SYM_NAMES.forEach((n, i) => { SymId[n] = 3000 + i; });
+function symName(v) { const i = v - 3000; return i >= 0 && i < SYM_NAMES.length ? SYM_NAMES[i] : undefined; }
+// Articulation::subtypeUserName(): the (translated) display name, e.g. "Staccato below", "Up bow"
+function symUserName(v) {
+    const words = (symName(v) || 'unknown').replace(/^(artic|ornament|strings|plucked|brassMute)/, '')
+        .replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
+    return words.charAt(0).toUpperCase() + words.slice(1);
+}
 
 // Longest TDuration (up to 4 dots) that fits `ticks`, else a quarter:
 // what Cursor.setDuration() does with a duration that isn't one value.
@@ -85,7 +110,8 @@ class MockMuseScore {
         const bars = opts.bars || 4;
         const ts = opts.timesig || [4, 4];
         this.state = {
-            nstaves, measures: [], crs: {}, ties: {}, anns: [], keys: {}, clefs: {}, nextId: 1, locks: null,
+            nstaves, measures: [], crs: {}, ties: {}, anns: [], keys: {}, clefs: {}, nextId: 2, locks: null,
+            parts: [{ id: 1, instrumentId: 'piano', longName: 'Piano', partName: 'Piano', shortName: 'Pno.', nstaves, show: true }],
             frame: opts.noTitle ? null : { elements: [{ id: 0, type: Element.TEXT, subStyle: Tid.TITLE, text: 'Mock' }] },
         };
         for (let t = 0; t < nstaves * VOICES; t++) this.state.crs[t] = [];
@@ -345,7 +371,17 @@ class MockMuseScore {
         switch (el.type) {
             case Element.ARTICULATION:
             case Element.ORNAMENT:
-                if (cr && !cr.rest) { el.id = this.id(); cr.arts.push(el); }
+                if (!symName(el.symbol) || el.symbol === SymId.noSym) throw new Error('mock: articulation without a valid symbol');
+                if (cr && !cr.rest) {
+                    el.id = this.id();
+                    // Layout puts it on the side away from the stem: below a low note (stem up)
+                    const name = symName(el.symbol);
+                    const low = Math.max(...cr.notes.map(n => n.pitch)) < 71 && track % VOICES === 0;
+                    if (low && /Above$/.test(name) && SymId[name.replace(/Above$/, 'Below')] !== undefined) {
+                        el.symbol = SymId[name.replace(/Above$/, 'Below')];
+                    }
+                    cr.arts.push(el);
+                }
                 return;
             case Element.LYRICS:
                 if (cr) { el.id = this.id(); el.verse = el.verse || 0; cr.lyrics.push(el); }
@@ -423,15 +459,6 @@ class MockMuseScore {
         return tempo;
     }
 
-    corrupted(mi, staff) {
-        const m = this.state.measures[mi];
-        let pos = m.tick;
-        for (const c of this.trackCrs(staff * VOICES).filter(x => x.tick >= m.tick && x.tick < m.tick + m.ticks)) {
-            if (c.tick !== pos) return true;
-            pos += c.actual;
-        }
-        return pos !== m.tick + m.ticks;
-    }
 
     // What a track holds, for assertions: [{tick, ticks, actual, rest, pitches, tiedForward, tiedBack}]
     dump(track, from = 0, to = Infinity) {
@@ -522,7 +549,7 @@ class MockMuseScore {
             get notes() { return live().notes.map(n => eng.wrapNote(n.id)); },
             get lyrics() { return live().lyrics.map(l => Object.assign({}, l)); },
             get articulations() {
-                return live().arts.map(a => Object.assign({ subtypeName() { return a.symbol; } }, a));
+                return live().arts.map(a => Object.assign({ subtypeName() { return symUserName(a.symbol); } }, a));
             },
             get graceNotes() { return []; },
             add(el) {
@@ -572,7 +599,8 @@ class MockMuseScore {
             get repeatCount() { return live().repeatCount; },
             set repeatCount(v) { eng.requireOpen('Measure.repeatCount ='); live().repeatCount = v; },
             get elements() { return live().elements; },
-            corrupted(staff) { return eng.corrupted(eng.state.measures.indexOf(live()), staff); },
+            // MuseScore sets this flag only when it checks a score it loads: stale after edits
+            corrupted(staff) { return false; },
             get nextMeasure() { return eng.wrapMeasure(i + 1); },
             get prevMeasure() { return i > 0 ? eng.wrapMeasure(i - 1) : null; },
             get prev() { return i > 0 ? eng.wrapMeasure(i - 1) : eng.wrapFrame(); },
@@ -680,6 +708,105 @@ class MockMuseScore {
         if (!this.open) throw new Error('mock: ' + what + ' outside startCmd/endCmd');
     }
 
+    // ---------------- parts (instruments) ----------------
+    // A part's staves are consecutive, in part order (MuseScore relies on that).
+    partStart(partId) {
+        let s = 0;
+        for (const p of this.state.parts) { if (p.id === partId) return s; s += p.nstaves; }
+        return -1;
+    }
+    partOfStaff(staff) {
+        let s = 0;
+        for (const p of this.state.parts) { if (staff < s + p.nstaves) return p; s += p.nstaves; }
+        return null;
+    }
+    partById(id) { return this.state.parts.find(p => p.id === id) || null; }
+
+    // Moves staff data to new indices (map: old staff -> new staff; unmapped staves are dropped).
+    remapStaves(map, count) {
+        const st = this.state;
+        const crs = {}, keys = {}, clefs = {};
+        for (let t = 0; t < count * VOICES; t++) crs[t] = [];
+        for (const t in st.crs) {
+            const ns = map[this.staffOf(+t)];
+            if (ns === undefined) continue;
+            const nt = ns * VOICES + (+t % VOICES);
+            crs[nt] = st.crs[t];
+            for (const c of crs[nt]) c.track = nt;
+        }
+        for (const s in st.keys) if (map[s] !== undefined) keys[map[s]] = st.keys[s];
+        for (const s in st.clefs) if (map[s] !== undefined) clefs[map[s]] = st.clefs[s];
+        st.anns = st.anns.filter(a => a.track < 0 || map[this.staffOf(a.track)] !== undefined);
+        for (const a of st.anns) if (a.track >= 0) a.track = map[this.staffOf(a.track)] * VOICES + a.track % VOICES;
+        st.crs = crs;
+        st.keys = keys;
+        st.clefs = clefs;
+        st.nstaves = count;
+        for (const id in st.ties) {
+            if (!this.findNote(st.ties[id].start) || !this.findNote(st.ties[id].end)) delete st.ties[id];
+        }
+    }
+
+    // Score::appendPart(template): new staves at the bottom, the part last.
+    appendPart(instrumentId) {
+        const t = MOCK_INSTRUMENTS[instrumentId] || MOCK_INSTRUMENTS.piano;   // MuseScore falls back to a default
+        const st = this.state;
+        const s0 = st.nstaves;
+        for (let i = 0; i < t.clefs.length; i++) {
+            const s = s0 + i;
+            for (let v = 0; v < VOICES; v++) st.crs[s * VOICES + v] = [];
+            for (const m of st.measures) this.insertCr(this.newCr(s * VOICES, m.tick, m.ticks, m.ticks, null));
+            st.keys[s] = st.keys[0].map(k => Object.assign({}, k));
+            st.clefs[s] = [{ tick: 0, type: ClefType[t.clefs[i]] }];
+        }
+        st.nstaves += t.clefs.length;
+        st.parts.push({ id: this.id(), instrumentId: t.id, longName: t.name, partName: t.name, shortName: t.short,
+                        nstaves: t.clefs.length, show: true });
+    }
+
+    // EditPart::moveParts: the new part order, then the staves sorted to match (SortStaves).
+    moveParts(ids, destId, after) {
+        const st = this.state;
+        const moving = ids.map(id => this.partById(id));
+        const order = st.parts.filter(p => ids.indexOf(p.id) < 0);
+        let at = order.findIndex(p => p.id === destId);
+        if (at < 0 || moving.some(p => !p)) return;
+        if (after) at++;
+        order.splice(at, 0, ...moving);
+        const map = {};
+        let n = 0;
+        for (const p of order) { const s0 = this.partStart(p.id); for (let i = 0; i < p.nstaves; i++) map[s0 + i] = n++; }
+        this.remapStaves(map, n);
+        st.parts = order;
+    }
+
+    removeParts(ids) {
+        const st = this.state;
+        const keep = st.parts.filter(p => ids.indexOf(p.id) < 0);
+        const map = {};
+        let n = 0;
+        for (const p of keep) { const s0 = this.partStart(p.id); for (let i = 0; i < p.nstaves; i++) map[s0 + i] = n++; }
+        this.remapStaves(map, n);
+        st.parts = keep;
+    }
+
+    // A live Part wrapper (MuseScore makes a new wrapper on every access; is() compares the part)
+    wrapPart(id) {
+        const eng = this;
+        const live = () => { const p = eng.partById(id); if (!p) throw new Error('mock: part ' + id + ' is not in the score'); return p; };
+        return {
+            __partId: id,
+            is(other) { return !!other && other.__partId === id; },
+            get startTrack() { return eng.partStart(id) * VOICES; },
+            get endTrack() { return (eng.partStart(id) + live().nstaves) * VOICES; },
+            get instrumentId() { return live().instrumentId; },
+            get longName() { return live().longName; },
+            get partName() { return live().partName; },
+            get shortName() { return live().shortName; },
+            get show() { return live().show; },
+        };
+    }
+
     scoreApi() {
         const eng = this;
         const selection = {
@@ -707,22 +834,40 @@ class MockMuseScore {
                 return true;
             },
         };
-        const staves = [];
-        for (let s = 0; s < eng.state.nstaves; s++) {
-            staves.push({
-                part: { longName: 'Staff ' + s, partName: 'Staff ' + s, shortName: '', instrumentId: 'piano', startTrack: 0, endTrack: eng.state.nstaves * VOICES, show: true },
-                key(f) { let k = 0; for (const e of eng.state.keys[s]) if (e.tick <= f.ticks) k = e.fifths; return k; },
-                swing() { return { isOn: false }; },
-                clefType(f) { let c = 0; for (const e of eng.state.clefs[s]) if (e.tick <= f.ticks) c = e.type; return c; },
-                transpose() { return { chromatic: 0, diatonic: 0 }; },
-            });
-        }
+        const staffApi = s => ({
+            get part() { const p = eng.partOfStaff(s); return p ? eng.wrapPart(p.id) : null; },
+            key(f) { let k = 0; for (const e of eng.state.keys[s]) if (e.tick <= f.ticks) k = e.fifths; return k; },
+            swing() { return { isOn: false }; },
+            clefType(f) { let c = 0; for (const e of eng.state.clefs[s]) if (e.tick <= f.ticks) c = e.type; return c; },
+            transpose() { return { chromatic: 0, diatonic: 0 }; },
+        });
+        const partId = (part, what) => {
+            if (!part || part.__partId === undefined || !eng.partById(part.__partId)) throw new Error('mock: ' + what + ' with a part that is not in the score');
+            return part.__partId;
+        };
         const api = {
             is(other) { return other === api; },
             get nstaves() { return eng.state.nstaves; },
             get ntracks() { return eng.state.nstaves * VOICES; },
-            staves,
-            parts: [staves[0].part],
+            get staves() { const out = []; for (let s = 0; s < eng.state.nstaves; s++) out.push(staffApi(s)); return out; },
+            get parts() { return eng.state.parts.map(p => eng.wrapPart(p.id)); },
+            appendPart(id) { eng.requireOpen('appendPart'); eng.appendPart(id); },
+            insertPart() {
+                throw new Error('mock: Score.insertPart in 4.7.5 adds the staves before the part (EditPart::insertPart), ' +
+                                'so the staff order no longer matches the part order');
+            },
+            moveParts(parts, dest, mode) {
+                eng.requireOpen('moveParts');
+                eng.moveParts(parts.map(p => partId(p, 'moveParts')), partId(dest, 'moveParts'), mode === 1);
+            },
+            removeParts(parts) { eng.requireOpen('removeParts'); eng.removeParts(parts.map(p => partId(p, 'removeParts'))); },
+            replaceInstrument(part, id) {
+                eng.requireOpen('replaceInstrument');
+                const p = eng.partById(partId(part, 'replaceInstrument'));
+                const t = MOCK_INSTRUMENTS[id];
+                if (!t) return;                                      // MuseScore logs and does nothing
+                Object.assign(p, { instrumentId: t.id, longName: t.name, partName: t.name, shortName: t.short });
+            },
             title: 'Mock', duration: 0,
             get spanners() { return []; },
             metaTag(k) { return eng.meta[k] || ''; },
@@ -733,8 +878,14 @@ class MockMuseScore {
                 if (!eng.state.frame) eng.state.frame = { elements: [] };
                 eng.state.frame.elements.push({ id: eng.id(), type: Element.TEXT, subStyle: TextStyleType[style], text });
             },
-            setInstrumentName(part, tick, name) { eng.requireOpen('setInstrumentName'); part.longName = name; part.partName = name; },
-            setInstrumentAbbreviature(part, tick, name) { eng.requireOpen('setInstrumentAbbreviature'); part.shortName = name; },
+            setInstrumentName(part, tick, name) {
+                eng.requireOpen('setInstrumentName');
+                eng.partById(partId(part, 'setInstrumentName')).longName = name;
+            },
+            setInstrumentAbbreviature(part, tick, name) {
+                eng.requireOpen('setInstrumentAbbreviature');
+                eng.partById(partId(part, 'setInstrumentAbbreviature')).shortName = name;
+            },
             addRemoveSystemLocks(interval, lock) {
                 eng.requireOpen('addRemoveSystemLocks');
                 if (eng.selection.kind !== 'range') return;          // works on the selected bars
@@ -974,6 +1125,9 @@ class MockMuseScore {
                 if (s !== score) return false;
                 if (/missing-folder/.test(p)) return false;
                 eng.exports.push({ path: p, ext });
+                // Write a placeholder when the folder exists (dry runs of the live tests check the file)
+                const out = p.endsWith(ext) ? p : p + '.' + ext;
+                try { if (fs.statSync(path.dirname(out)).isDirectory()) fs.writeFileSync(out, 'mock ' + ext + ' export\n'); } catch (e) {}
                 return true;
             },
             cmd(code) { eng.cmd(code); },
@@ -1006,4 +1160,4 @@ class MockMuseScore {
     }
 }
 
-module.exports = { MockMuseScore, Element, WHOLE, tdurationTicks, Tid, ClefType, LayoutBreak, DynamicType };
+module.exports = { MockMuseScore, Element, WHOLE, tdurationTicks, Tid, ClefType, LayoutBreak, DynamicType, SymId, symName };

@@ -11,7 +11,7 @@ Use this skill when a user asks to read, analyze, compose, arrange, transpose or
 
 ## Read the right detail
 
-- [references/tools.md](references/tools.md): the source of truth for the 71 public MCP tools, the compact notation, positions, durations and ties, score versions, and batches. Read it before constructing a `process_sequence` or a long `notation`.
+- [references/tools.md](references/tools.md): the source of truth for the 70 public MCP tools, the compact notation, positions, durations and ties, score versions, and batches. Read it before constructing a `process_sequence` or a long `notation`.
 - [references/architecture.md](references/architecture.md): connection, plugin, port, response envelope, MuseScore version problems.
 - [references/client-configuration.md](references/client-configuration.md): stdio configuration for a client.
 - [references/runtime.md](references/runtime.md): installing, the Python runtime, the repository's CLI helpers.
@@ -37,7 +37,7 @@ Use this skill when a user asks to read, analyze, compose, arrange, transpose or
 - Don't claim an edit succeeded without reading it back from MuseScore.
 - Preserve the user's music outside the requested change: prefer `write_voice`/`replace_section` on exact bars over clearing large ranges; `transpose(key_signatures=true)` only when the key should change.
 - Unknown arguments and fields are errors. If one is refused, the feature doesn't exist in that form: use the documented tools instead of guessing variants.
-- Some things the plugin API can't do: voltas, pedal lines (pedal marks are symbols only), grace notes, pickup (anacrusis) bars, opening a second score window. Say so instead of improvising.
+- Some things the plugin API can't do: voltas, pedal lines (pedal marks are symbols only), grace notes, pickup (anacrusis) bars, opening a second score window, muting or soloing (MuseScore 4's mixer is not reachable from plugins). Say so instead of improvising.
 - `undo` takes back your last edit (a `copy_measures` call can be several undo steps: see `undoSteps`).
 - `save_score` and `export_score` write files on the user's computer: only when asked.
 

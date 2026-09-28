@@ -46,6 +46,7 @@ def _pitch_list(value: Any, label: str) -> List[Any]:
     return out
 
 
+MAX_VERSES = 20
 _NOTE_KEYS = {"pitches", "rest", "duration", "tie", "dynamic", "articulations", "lyric", "text", "chord"}
 _TUPLET_RE = re.compile(r"^\s*(\d+)\s*:\s*(\d+)\s*$")
 
@@ -70,12 +71,25 @@ def _marks(ev: Dict[str, Any], where: str, is_rest: bool) -> Dict[str, Any]:
                 raise ValueError(f"{where}: a rest can only have a fermata, not {name}")
             names.append(name)
         out["articulations"] = names
-    for key in ("lyric", "text", "chord"):
+    if ev.get("lyric") is not None:
+        lyric = ev["lyric"]
+        if is_rest:
+            raise ValueError(f"{where}: a rest can't have a lyric")
+        if isinstance(lyric, list):
+            # one entry per verse (null: no syllable in that verse)
+            if not 1 <= len(lyric) <= MAX_VERSES or not all(v is None or (isinstance(v, str) and v) for v in lyric) \
+                    or not any(lyric):
+                raise ValueError(f"{where}: lyric must be a non-empty string, or a list with one per verse "
+                                 f"(up to {MAX_VERSES}; null or a string for each, at least one string)")
+            out["lyric"] = lyric[0] if len(lyric) == 1 else list(lyric)
+        elif isinstance(lyric, str) and lyric:
+            out["lyric"] = lyric
+        else:
+            raise ValueError(f"{where}: lyric must be a non-empty string, or a list with one per verse")
+    for key in ("text", "chord"):
         if ev.get(key) is not None:
             if not isinstance(ev[key], str) or not ev[key]:
                 raise ValueError(f"{where}: {key} must be a non-empty string")
-            if key == "lyric" and is_rest:
-                raise ValueError(f"{where}: a rest can't have a lyric")
             out[key] = ev[key]
     return out
 

@@ -166,10 +166,26 @@ ARTICULATION_ALIASES = {"stacc": "staccato", "stac": "staccato", "ten": "tenuto"
 _SYMBOL_TO_NAME = {sym: name for name, sym in ARTICULATIONS.items()}
 
 
+def lyric_value(verses: Dict[int, str]) -> Any:
+    """The event's lyric field: a string for verse 1 alone, else a list with one entry per verse
+    (None where a verse has no syllable on this note)."""
+    if set(verses) == {1}:
+        return verses[1]
+    return [verses.get(v) for v in range(1, max(verses) + 1)]
+
+
+def read_only_mark(text: str) -> str:
+    """A marking the view shows but notation can't write: "!" + the words joined by "-"
+    ("Marcato-tenuto above" -> "!Marcato-tenuto-above")."""
+    return "!" + (re.sub(r"[^\w#+-]+", "-", str(text)).strip("-") or "unknown")
+
+
 def articulation_name(symbol: str) -> str:
-    """Our name for a MuseScore articulation symbol (articStaccatoBelow -> staccato)."""
+    """Our name for a MuseScore articulation symbol (articStaccatoBelow -> staccato). Symbols the
+    tools can't write (the plugin sends MuseScore's display name for those) become read-only marks."""
     base = re.sub(r"(Above|Below)$", "", symbol or "")
-    return _SYMBOL_TO_NAME.get(base, symbol or "?")
+    name = _SYMBOL_TO_NAME.get(base)
+    return name if name else read_only_mark(symbol or "unknown")
 
 
 def _parse_marks(text: str, where: str, is_rest: bool) -> Dict[str, Any]:
@@ -192,6 +208,14 @@ def _parse_marks(text: str, where: str, is_rest: bool) -> Dict[str, Any]:
         while j < n and text[j] not in " \t\n,;=\"'":
             j += 1
         word = text[i:j]
+        if j < n and text[j] in "\"'" and re.fullmatch(r"[vV][1-9]\d?", word):
+            # v2"lo": the lyric of verse 2
+            k = text.find(text[j], j + 1)
+            if k < 0:
+                raise ValueError(f"{where}: unclosed quote in markings ({text})")
+            items.append((f"lyric{int(word[1:])}", text[j + 1:k], True))
+            i = k + 1
+            continue
         if j < n and text[j] == "=":
             j += 1
             if j < n and text[j] in "\"'":
@@ -209,9 +233,18 @@ def _parse_marks(text: str, where: str, is_rest: bool) -> Dict[str, Any]:
             continue
         items.append((word, None, False))
         i = j
+    verses: Dict[int, str] = {}
     for key, value, _ in items:
         if value is not None:
-            if key in ("lyric", "text", "chord"):
+            lyric_verse = re.fullmatch(r"lyric(\d*)", key)
+            if lyric_verse:
+                verse = int(lyric_verse.group(1) or 1)
+                if not value:
+                    raise ValueError(f"{where}: the lyric is empty")
+                if verse in verses:
+                    raise ValueError(f"{where}: two lyrics for verse {verse} (other verses: v2\"...\")")
+                verses[verse] = value
+            elif key in ("text", "chord"):
                 if not value:
                     raise ValueError(f"{where}: {key} is empty")
                 if key in marks:
@@ -224,6 +257,9 @@ def _parse_marks(text: str, where: str, is_rest: bool) -> Dict[str, Any]:
             continue
         word = key
         low = word.lower()
+        if word.startswith("!"):
+            raise ValueError(f"{where}: {word} is read-only: get_score shows it, but grace notes and that kind of "
+                             f"marking can't be written. Leave it out (writing over that note replaces it without it)")
         if low in DYNAMICS:
             if "dynamic" in marks:
                 raise ValueError(f"{where}: two dynamics")
@@ -234,6 +270,8 @@ def _parse_marks(text: str, where: str, is_rest: bool) -> Dict[str, Any]:
         else:
             raise ValueError(f"{where}: unknown marking {word!r} (dynamics like mf, articulations "
                              f"{', '.join(ARTICULATIONS)}, fermata, \"lyric\", text=\"...\", chord=Cmaj7)")
+    if verses:
+        marks["lyric"] = lyric_value(verses)
     if is_rest:
         bad = [a for a in marks.get("articulations", []) if a != "fermata"]
         if bad:

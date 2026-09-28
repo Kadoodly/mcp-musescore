@@ -191,7 +191,6 @@ MuseScore {
         "addInstrument": ["instrumentId", "position"],
         "setInstrumentName": ["staff", "part", "name", "shortName"],
         "removeInstrument": ["part", "staff"],
-        "setStaffMute": ["staff", "mute"],
         "setInstrumentSound": ["staff", "instrumentId"],
         "setTimeSignature": ["numerator", "denominator", "measure"],
         "transpose": ["semitones", "startMeasure", "endMeasure", "startTick", "endTick", "staves", "voices", "chordSymbols", "keySignatures"],
@@ -208,7 +207,7 @@ MuseScore {
         "saveScore": [],
         "redo": ["steps"],
         "getSelection": [],
-        "checkScore": [],
+        "checkScore": ["startMeasure", "endMeasure"],
         "openScore": ["path"]
     })
 
@@ -300,7 +299,6 @@ MuseScore {
             // Staff & Instruments
             case "addInstrument":           return addInstrument(params);
             case "removeInstrument":        return removeInstrument(params);
-            case "setStaffMute":            return setStaffMute(params);
             case "setInstrumentSound":      return setInstrumentSound(params);
             case "setInstrumentName":       return setInstrumentName(params);
             case "setTimeSignature":        return setTimeSignature(params);
@@ -871,7 +869,7 @@ MuseScore {
             var arts = element.articulations;
             if (arts && arts.length > 0) {
                 base.articulations = [];
-                for (var a = 0; a < arts.length; a++) base.articulations.push(safeSubtypeName(arts[a]));
+                for (var a = 0; a < arts.length; a++) base.articulations.push(articulationSymbolName(arts[a]));
             }
             if (element.graceNotes && element.graceNotes.length > 0) base.graceNotes = element.graceNotes.length;
             base.notes = [];
@@ -941,6 +939,34 @@ MuseScore {
         } catch (e) {
             return "";
         }
+    }
+
+    // The symbol name of an articulation or ornament the tools know
+    // ("articStaccatoBelow": MuseScore flips Above/Below with the stem), else
+    // MuseScore's display name. subtypeName() alone is the translated display
+    // name ("Staccato below"), which depends on the UI language. el.symbol is
+    // the SymId value; SymId maps names to values.
+    property var symbolNamesById: null
+    function articulationSymbolName(el) {
+        if (symbolNamesById === null) {
+            var map = {};
+            [articulationSymbols, ornamentSymbols].forEach(function(table) {
+                for (var k in table) {
+                    var names = [table[k]];
+                    if (/Above$/.test(table[k])) names.push(table[k].replace(/Above$/, "Below"));
+                    for (var i = 0; i < names.length; i++) {
+                        var v = SymId[names[i]];
+                        if (v !== undefined && v !== null) map[v] = names[i];
+                    }
+                }
+            });
+            symbolNamesById = map;
+        }
+        try {
+            var name = symbolNamesById[el.symbol];
+            if (name) return name;
+        } catch (e) {}
+        return safeSubtypeName(el);
     }
 
     function ticksOf(f) {
@@ -1030,7 +1056,7 @@ MuseScore {
         "deleteSelection", "getCursorInfo", "setCursor", "goToMeasure", "goToBeginningOfScore",
         "goToFinalMeasure", "nextElement", "prevElement", "nextStaff", "prevStaff",
         "selectCurrentMeasure", "selectCustomRange", "setTimeSignature", "setTempo",
-        "addDynamic", "addFermata", "addInstrument", "removeInstrument", "setStaffMute",
+        "addDynamic", "addFermata", "addInstrument", "removeInstrument",
         "setInstrumentSound", "setInstrumentName", "undo",
         "addRepeat", "removeRepeat", "addMarker", "addJump", "addRehearsalMark",
         "setKeySignature", "addGradualTempoChange", "removeMarking", "addSlur", "addHairpin",
@@ -1506,8 +1532,16 @@ MuseScore {
         }
         if (isSet(ev.lyric)) {
             if (isRest) throw new Error(where + ": a rest can't have a lyric");
-            if (typeof ev.lyric !== "string" || !ev.lyric.length) throw new Error(where + ": lyric must be a non-empty string");
-            marks.lyric = ev.lyric;
+            // A string (verse 1) or one per verse (null: nothing in that verse)
+            var verses = Array.isArray(ev.lyric) ? ev.lyric : [ev.lyric];
+            var any = false;
+            for (var v = 0; v < verses.length; v++) {
+                if (verses[v] === null || verses[v] === undefined) continue;
+                if (typeof verses[v] !== "string" || !verses[v].length) throw new Error(where + ": lyric must be a non-empty string, or a list with one per verse");
+                any = true;
+            }
+            if (!any || verses.length > 20) throw new Error(where + ": lyric must be a non-empty string, or a list with one per verse (up to 20)");
+            marks.lyrics = verses.slice();
         }
         ["text", "chord"].forEach(function(key) {
             if (isSet(ev[key])) {
@@ -1999,7 +2033,7 @@ MuseScore {
 
         // Spelling, then markings on the first piece of each note/rest.
         var flat = flattenEvents(events);
-        var inWord = false;
+        var inWord = [];      // per verse: the last syllable continues a word
         for (i = 0; i < flat.length; i++) {
             ev = flat[i];
             var at = { tick: ev.units[0].tick, staff: t.staff, voice: t.voice };
@@ -2011,13 +2045,14 @@ MuseScore {
             if (marks.articulations) putArticulations(at, marks.articulations);
             if (marks.text) putText(at, Element.EXPRESSION, marks.text);
             if (marks.chord) putText(at, Element.HARMONY, marks.chord);
-            if (marks.lyric) {
-                var raw = marks.lyric;
-                if (raw !== "_") {
+            if (marks.lyrics) {
+                for (var verse = 0; verse < marks.lyrics.length; verse++) {
+                    var raw = marks.lyrics[verse];
+                    if (raw === null || raw === undefined || raw === "_") continue;
                     var cont = raw.length > 1 && raw.charAt(raw.length - 1) === "-";
                     var text = cont ? raw.substring(0, raw.length - 1) : raw;
-                    putLyric(at, text, inWord ? (cont ? Lyrics.MIDDLE : Lyrics.END) : (cont ? Lyrics.BEGIN : Lyrics.SINGLE), 0);
-                    inWord = cont;
+                    putLyric(at, text, inWord[verse] ? (cont ? Lyrics.MIDDLE : Lyrics.END) : (cont ? Lyrics.BEGIN : Lyrics.SINGLE), verse);
+                    inWord[verse] = cont;
                 }
             }
         }
@@ -2910,7 +2945,9 @@ MuseScore {
         if (!curScore) return { error: "No score open" };
         if (typeof params.path !== "string" || !params.path.length) return { error: "path must be a file path" };
         var format = String(params.format).toLowerCase().replace(/^\./, "");
-        if (!/^[a-z0-9]+$/.test(format)) return { error: "format must be an extension like pdf, mid, musicxml" };
+        // Audio and video go through the audio engine with a progress dialog: not from a plugin request
+        var formats = ["pdf", "png", "svg", "mid", "midi", "musicxml", "xml", "mxl", "mei", "mscz", "mscx"];
+        if (formats.indexOf(format) < 0) return { error: "format must be one of " + formats.join(", ") + " (audio: File > Export in MuseScore)" };
         var ok = writeScore(curScore, params.path, format);
         if (!ok) return { error: "MuseScore could not export to " + params.path + " as " + format + " (unsupported format, or the folder doesn't exist)" };
         // EngravingPluginAPIHelper::writeScore adds "." + ext unless the name already ends with ext
@@ -2983,18 +3020,39 @@ MuseScore {
         return { success: true, message: "Opened " + params.path, title: curScore.title, numMeasures: listMeasures().length };
     }
 
-    // Bars whose voices don't add up (MuseScore marks them corrupted).
+    // Bars whose voices don't add up, checked as MuseScore checks a score it
+    // loads (MasterScore::sanityCheck): voice 1 must fill the bar exactly,
+    // voices 2-4 must not be longer than it. Measure.corrupted() is only
+    // updated by that check (on loading), so it says nothing about later edits.
     function checkScore(params) {
         if (!curScore) return { error: "No score open" };
         var measures = listMeasures();
+        var first = isSet(params.startMeasure) ? checkInt(params.startMeasure, "startMeasure", 1, measures.length) : 1;
+        var last = isSet(params.endMeasure) ? checkInt(params.endMeasure, "endMeasure", first, measures.length) : measures.length;
+        var ntracks = curScore.nstaves * 4;
         var problems = [];
-        for (var i = 0; i < measures.length; i++) {
-            for (var s = 0; s < curScore.nstaves; s++) {
-                if (measures[i].obj.corrupted(s)) problems.push({ measure: measures[i].number, staff: s });
+        for (var i = first - 1; i < last; i++) {
+            var md = measures[i];
+            var len = md.endTick - md.startTick;
+            var sums = [];
+            for (var t = 0; t < ntracks; t++) sums.push(0);
+            for (var seg = md.obj.firstSegment; seg; seg = seg.nextInMeasure) {
+                for (var tr = 0; tr < ntracks; tr++) {
+                    var el = seg.elementAt(tr);
+                    if (el && (el.type === Element.CHORD || el.type === Element.REST)) sums[tr] += el.actualDuration.ticks;
+                }
+            }
+            for (tr = 0; tr < ntracks; tr++) {
+                var v = tr % 4;
+                if (v === 0 ? sums[tr] !== len : sums[tr] > len) {
+                    problems.push({ measure: md.number, staff: Math.floor(tr / 4), voice: v,
+                                    problem: sums[tr] < len ? "incomplete" : "too long",
+                                    found: ticksText(sums[tr]), expected: ticksText(len) });
+                }
             }
         }
-        return { success: true, ok: problems.length === 0, corrupted: problems,
-                 message: problems.length ? problems.length + " corrupted bar/staff combination(s)" : "No corrupted bars" };
+        return { success: true, ok: problems.length === 0, corrupted: problems, startMeasure: first, endMeasure: last,
+                 message: problems.length ? problems.length + " voice(s) that don't add up to their bar" : "Every voice adds up" };
     }
 
     // Creates a tuplet filled with rests. By default the cursor stays at its
@@ -3749,22 +3807,43 @@ MuseScore {
 
         var count = curScore.parts.length;
         var position = isSet(params.position) ? checkInt(params.position, "position", 0, count) : count;
-        return mutate(function() {
-            if (position === count) {
-                curScore.appendPart(params.instrumentId);
-            } else {
-                // insertPart doesn't fall back to a default instrument for an unknown id
-                curScore.insertPart(params.instrumentId, position);
-                if (curScore.parts.length !== count + 1) throw new Error("Unknown instrument id '" + params.instrumentId + "' (see list_instruments)");
-            }
-            var parts = curScore.parts;
-            var added = partSummary(parts[position], position);
-            var result = { message: "Instrument " + added.name + " added on staff " + added.staves.join(", "), part: added };
+        // Score.insertPart isn't used: in 4.7.5 it adds the new staves before
+        // the part (EditPart::insertPart), so anywhere but the end the staff
+        // order no longer matches the part order. The part is appended, then
+        // moved in a command of its own, like the Instruments panel does
+        // (NotationParts::moveParts -> EditPart::moveParts).
+        if (position < count && cmdDepth > 0) {
+            return { error: "add_instrument with a position takes two undo steps, so it can't be part of an atomic sequence; run it on its own" };
+        }
+        var result = mutate(function() {
+            curScore.appendPart(params.instrumentId);
+            if (curScore.parts.length !== count + 1) throw new Error("MuseScore did not add the instrument");
+            var added = partSummary(curScore.parts[count], count);
+            var r = { message: "Instrument " + added.name + " added on staff " + added.staves.join(", "), part: added };
             if (added.instrumentId !== params.instrumentId) {
-                result.warning = "Instrument id '" + params.instrumentId + "' was not found; MuseScore used '" + added.instrumentId + "' instead";
+                r.warning = "Instrument id '" + params.instrumentId + "' was not found; MuseScore used '" + added.instrumentId + "' instead";
             }
-            return result;
+            return r;
         });
+        if (result.error || position === count) return result;
+
+        var moved = mutate(function() {
+            var parts = curScore.parts;
+            var part = parts[count];
+            curScore.moveParts([part], parts[position], 0);   // 0 = before
+            if (!curScore.parts[position].is(part)) throw new Error("MuseScore did not move the instrument");
+            return { part: partSummary(curScore.parts[position], position) };
+        });
+        if (moved.error) {
+            result.warning = (result.warning ? result.warning + "; " : "") + "it stayed at the bottom: moving it to position " + position +
+                             " failed (" + moved.error + ")";
+            return result;
+        }
+        result.part = moved.part;
+        result.message = "Instrument " + moved.part.name + " added at position " + position + " (staff " + moved.part.staves.join(", ") + ")";
+        result.undoSteps = 2;
+        if (moved.cursor) result.cursor = moved.cursor;
+        return result;
     }
 
     // Removes a whole instrument (part), given its part index or any staff index.
@@ -3820,23 +3899,6 @@ MuseScore {
             touch(0, 0);
             return { message: "Instrument " + partIndexOf(part) + " is now named " + (part.longName || params.name) +
                               (isSet(params.shortName) ? " (" + params.shortName + ")" : "") };
-        });
-    }
-
-    function setStaffMute(params) {
-        var validation = validateParams(params, ["staff"]);
-        if (!validation.valid) return validation;
-
-        return executeWithUndo(function() {
-            var staff = curScore.staves && curScore.staves[params.staff] ||
-                       (typeof curScore.staff === "function" ? curScore.staff(params.staff) : null);
-
-            if (staff) {
-                staff.invisible = Boolean(params.mute);
-                return { success: true, message: "Staff " + (params.mute ? "muted" : "unmuted") };
-            } else {
-                return { error: "Staff not found" };
-            }
         });
     }
 

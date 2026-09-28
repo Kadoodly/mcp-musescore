@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from .. import instruments as inst_data
 from ..client import MuseScoreClient
+from ..local_files import open_target
 from ..score_view import format_bars, format_score
 from ..utils.lilypond_converter import json_to_lilypond
 from .connection import format_score_header
@@ -142,14 +143,21 @@ def setup_score_state_tools(mcp, client: MuseScoreClient):
         Importing may show MuseScore's import dialog, which the user has to confirm.
 
         Args:
-            path: The file, on the computer running MuseScore (e.g. "C:/Users/me/Music/song.mscz")."""
-        return await client.send_command("openScore", {"path": path})
+            path: The file's full path, on the computer running MuseScore (e.g. "C:/Users/me/Music/song.mscz")."""
+        return await client.send_command("openScore", {"path": open_target(path)})
 
     @mcp.tool()
-    async def check_score():
-        """Check the score for corrupted bars (voices whose durations don't add up to the bar), which
-        MuseScore warns about on saving. Returns the bar and staff of each."""
-        return await client.send_command("checkScore")
+    async def check_score(start_measure: Optional[int] = None, end_measure: Optional[int] = None):
+        """Check for corrupted bars: voice 1 must fill its bar exactly and voices 2-4 must not be longer
+        than it (MuseScore reports such bars as corrupted when it opens the file). Returns each bar,
+        staff and voice with what it found and expected.
+
+        Args:
+            start_measure: First bar to check (default 1).
+            end_measure: Last bar to check (default: the last bar).
+        """
+        params = {k: v for k, v in (("startMeasure", start_measure), ("endMeasure", end_measure)) if v is not None}
+        return await client.send_command("checkScore", params)
 
     @mcp.tool()
     async def list_instruments(query: str = "", group: str = "", instrument_id: Optional[str] = None):

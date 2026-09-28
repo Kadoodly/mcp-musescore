@@ -150,7 +150,7 @@ musescore4
 
 ## Features
 
-71 tools; `skills/mcp-musescore/references/tools.md` is the full reference.
+70 tools; `skills/mcp-musescore/references/tools.md` is the full reference.
 
 ### Reading scores
 - `get_score(format, start_measure, end_measure, staves)` - The score in a compact notation, bar by bar and staff by staff, with the instruments (staff numbers, clefs, ranges), key, meter, tempo, markings, the score's version and the cursor. Identical bars and empty bars are collapsed, so long scores stay short. `format="json"` gives the raw data, `"lilypond"` LilyPond.
@@ -195,7 +195,7 @@ Writing can start anywhere (`measure` + `offset` inside the bar, e.g. `"3/8"`): 
 ### Score, instruments, files
 - `set_score_info(title, subtitle, composer, lyricist)`
 - `add_instrument(id, position)`, `set_instrument_name`, `remove_instrument`, `set_instrument_sound`
-- `export_score(path, format)` (pdf, mid, musicxml, mp3, ...), `save_score()`
+- `export_score(path, format, overwrite)` (pdf, png, svg, mid, musicxml, mxl, mei, mscz; audio only through MuseScore's File → Export), `save_score()`, `open_score(path)` (when no score is open), `check_score`
 
 ### Working alongside you
 - Every change raises the score's **version**, whether Claude made it or you did in MuseScore. Edits can carry `expected_version`: if you changed the score since Claude read it, the edit is refused instead of overwriting your work, and `get_changes_since(version)` shows Claude what you changed.
@@ -279,7 +279,7 @@ await transpose(semitones=7, start_measure=1, end_measure=16, key_signatures=Tru
 
 ### API Limitations
 - **Not possible through MuseScore 4.7's plugin API**: voltas (1st/2nd endings), pedal lines (`add_pedal_marks` writes the symbols only, without playback), real rit./accel. lines (`add_tempo_change` writes hidden tempo marks instead), grace notes, pickup bars, creating a new score, opening a second score while one is open (MuseScore opens it in another window)
-- **`set_staff_mute`**: not reliable in MuseScore 4; use the mixer instead
+- **Muting/soloing**: MuseScore 4's mixer is not reachable from plugins (the old `set_staff_mute` tool was removed: the channel mute it relied on does nothing since MuseScore 4.0); use the mixer
 - **Selection-based edits** (insert/delete bars, copy, slurs, hairpins, `add_articulation`, `set_measures_per_system`) are MuseScore's own actions: each is its own undo step and they can't be in an atomic batch; `copy_measures` uses the clipboard
 - **Tuplets**: `write_voice` writes new tuplets, but can't write into the middle of an existing one (clear it first)
 - **Ties** are made with MuseScore's own tie command, so the note to tie to (same pitch, same voice, right after) must exist by the end of the call or atomic batch; ties can't cross a repeat barline

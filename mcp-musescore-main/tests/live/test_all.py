@@ -121,11 +121,13 @@ class AllFeatures:
             print(f"The score ends in {meter}: setting 4/4 on the test bars (from bar {self.original_bars + 1}).")
             await lv.tool("set_time_signature", numerator=4, denominator=4, measure=self.original_bars + 1)
             a = await lv.analysis(self.original_bars + 1)
+            # MuseScore re-bars the (empty) test bars: same total length, other bar count
+            print(f"  MuseScore re-barred them into {len(a['measures'])} bars of 4/4.")
         self.bars = {m["measure"]: (m["startTick"], m["endTick"]) for m in a["measures"]}
         lengths = sorted({e - s for s, e in self.bars.values()})
-        if lengths != [WHOLE] or len(self.bars) != self.bars_to_add:
-            raise AssertionError(f"the test bars should be {self.bars_to_add} bars of 4/4 now, but they are {len(self.bars)} bars "
-                                 f"of {[f'{x}/1920' for x in lengths]}")
+        if lengths != [WHOLE]:
+            raise AssertionError(f"the test bars should all be 4/4 now, but their lengths are {[f'{x}/1920' for x in lengths]}")
+        self.bars_to_add = len(self.bars)
         self.next_bar = self.original_bars + 1
 
     def take(self, count=1):

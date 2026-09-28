@@ -12,7 +12,9 @@ def setup_time_tempo_tools(mcp, client: MuseScoreClient):
 
     @mcp.tool()
     async def set_time_signature(numerator: int = 4, denominator: int = 4, measure: Optional[int] = None):
-        """Set the time signature from a measure onwards.
+        """Set the time signature from a measure onwards. MuseScore re-bars the music after it: the notes
+        stay, but the bars after it are cut anew, so their number and numbering can change (e.g. 8 bars of
+        3/4 become 6 bars of 4/4). Read the score again afterwards.
 
         Args:
             numerator: Top number of time signature (beats per measure)

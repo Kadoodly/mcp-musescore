@@ -383,7 +383,8 @@ class MockMuseScore {
         }
     }
 
-    // Score::cmdAddTimeSig, only for empty bars at the end of the score (what the live test does)
+    // Score::cmdAddTimeSig, only for empty bars at the end of the score (what the live test does):
+    // they are re-barred, keeping their total length (80 bars of 7/4 become 140 bars of 4/4)
     setTimeSig(mi, f) {
         const ms = this.state.measures;
         for (let i = mi; i < ms.length; i++) {
@@ -396,19 +397,18 @@ class MockMuseScore {
             }
             if (this.state.anns.some(a => a.tick >= m.tick) ) throw new Error('mock: time signature change over markings');
         }
-        const num = f.numerator;
         let pos = ms[mi].tick;
+        const total = this.endTick - pos;
+        const len = WHOLE * f.numerator / f.denominator;
         for (const t in this.state.crs) {
             for (const c of this.trackCrs(+t).filter(x => x.tick >= pos)) this.removeCr(c);
         }
-        for (let i = mi; i < ms.length; i++) {
-            const m = ms[i];
-            m.num = num;
-            m.den = f.denominator;
-            m.tick = pos;
-            m.ticks = WHOLE * num / f.denominator;
-            for (let s = 0; s < this.state.nstaves; s++) this.insertCr(this.newCr(s * VOICES, m.tick, m.ticks, m.ticks, null));
-            pos += m.ticks;
+        ms.splice(mi);
+        for (let i = 0; i < Math.ceil(total / len); i++) {
+            ms.push({ id: this.id(), tick: pos, ticks: len, num: f.numerator, den: f.denominator,
+                      repeatStart: false, repeatEnd: false, repeatCount: 2, elements: [] });
+            for (let s = 0; s < this.state.nstaves; s++) this.insertCr(this.newCr(s * VOICES, pos, len, len, null));
+            pos += len;
         }
     }
 

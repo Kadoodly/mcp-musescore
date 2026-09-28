@@ -134,7 +134,7 @@ A range is `start_measure`/`end_measure` (whole bars, inclusive; `end_measure` d
 | `add_clef` | `type*`, `staff`, position | treble, bass, alto, tenor, soprano, mezzo-soprano, baritone, treble 8vb/8va/15ma, bass 8vb/8va, percussion. |
 | `set_tempo` | `bpm*`, `beat_unit = "1/4"`, `text`, position | A tempo mark (changes playback), replacing one at the same place; `beat_unit` "3/8" for a dotted-quarter beat in 6/8. |
 | `add_tempo_change` | `type*`, start, `end_measure`/`end_tick`, `target_bpm`, `factor`, `a_tempo` | rit./accel.: a visible marking plus hidden tempo marks that change playback smoothly (one undo step). |
-| `set_time_signature` | `numerator = 4`, `denominator = 4`, `measure` | From that bar on. |
+| `set_time_signature` | `numerator = 4`, `denominator = 4`, `measure` | From that bar on. MuseScore re-bars the music after it (the notes stay; the number and numbering of the following bars can change): read the score again. |
 | `set_key_signature` | `fifths*`, `measure`, `mode`, `staff` | From a bar on (concert key; transposing instruments get their written key). |
 | `add_slur`, `add_hairpin`, `add_articulation` | range, `staff`, `type` | Selection-based MuseScore actions; each is one undo step. (`write_voice` markings are the easier way to add articulations.) |
 | `add_repeat` / `remove_repeat` | `start_measure*`, `end_measure*`, `times = 2` | Repeat barlines. |

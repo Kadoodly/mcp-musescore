@@ -281,7 +281,7 @@ def setup_editing_tools(mcp, client: MuseScoreClient):
             path: File path on the computer running MuseScore, e.g. "C:/Users/me/Music/song". The
                 extension is added if missing. The folder must exist.
             format: pdf, png, svg, mid (MIDI), musicxml, mxl (compressed MusicXML), mp3, wav, ogg, flac,
-                mscz, mscx, brf."""
+                mscz, mscx, brf. png and svg make one file per page (numbered)."""
         return await client.send_command("exportScore", {"path": path, "format": format})
 
     @mcp.tool()

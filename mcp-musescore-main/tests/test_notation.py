@@ -73,6 +73,7 @@ def test_bar_lines_check_bar_lengths():
     ("C4:qD4", "not a duration"),
     ("", "notation is empty"),
     ("128:q", "not a MIDI pitch"),
+    ("C4:q @1/2 D4", "is a position from get_score's view"),
 ])
 def test_errors(text, message):
     with pytest.raises(ValueError, match=message):

@@ -362,6 +362,9 @@ class _Parser:
             token = self.word(":~([]{}|")
             if not token:
                 self.error(f"unexpected {self.peek()!r}")
+            if token.startswith("@"):
+                self.error(f"{token} is a position from get_score's view; to write, fill the gap with a rest "
+                           f"(r:h) or start the passage there (measure + offset)")
             if token.lower() == "r":
                 rest = True
             else:

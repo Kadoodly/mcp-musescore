@@ -66,15 +66,17 @@ def setup_navigation_tools(mcp, client: MuseScoreClient):
         return await client.send_command("setCursor", position_params(measure, tick, staff, voice, offset))
 
     @mcp.tool()
-    async def go_to_measure(measure: int, staff: Optional[int] = None, voice: Optional[int] = None):
-        """Move the cursor to the start of a measure (1-based), optionally also changing staff/voice.
+    async def go_to_measure(measure: int, offset: Optional[Offset] = None, staff: Optional[int] = None,
+                            voice: Optional[int] = None):
+        """Move the cursor to a measure (1-based), optionally also changing staff/voice.
 
         Args:
             measure: Measure number, starting at 1.
+            offset: Position inside the measure ("1/4" = beat 2 in 4/4). Default: its start.
             staff: Staff index (0-based). Default: keep the current staff.
             voice: Voice 0-3. Default: keep the current voice.
         """
-        return await client.send_command("goToMeasure", position_params(measure, None, staff, voice))
+        return await client.send_command("goToMeasure", position_params(measure, None, staff, voice, offset))
 
     @mcp.tool()
     async def go_to_final_measure():

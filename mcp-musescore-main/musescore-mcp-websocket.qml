@@ -2904,7 +2904,8 @@ MuseScore {
         if (!/^[a-z0-9]+$/.test(format)) return { error: "format must be an extension like pdf, mid, musicxml" };
         var ok = writeScore(curScore, params.path, format);
         if (!ok) return { error: "MuseScore could not export to " + params.path + " as " + format + " (unsupported format, or the folder doesn't exist)" };
-        var path = params.path.slice(-format.length - 1) === "." + format ? params.path : params.path + "." + format;
+        // EngravingPluginAPIHelper::writeScore adds "." + ext unless the name already ends with ext
+        var path = params.path.slice(-format.length) === format ? params.path : params.path + "." + format;
         return { success: true, message: "Exported to " + path, path: path };
     }
 

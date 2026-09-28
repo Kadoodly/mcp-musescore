@@ -422,7 +422,7 @@ class Step1:
         msg = await lv.expect_error(lv.tool("add_note", pitch=67, duration="1/4", tie=True, staff=0, voice=0, measure=first),
                                     "tie on pitch 67")
         assert await lv.snapshot(first, first) == before, "a failed add_note tie changed the score"
-        await lv.tool("processSequence", atomic=True, sequence=[
+        await lv.tool("process_sequence", atomic=True, sequence=[
             {"action": "setCursor", "params": {"measure": first, "staff": 0, "voice": 0}},
             {"action": "addNote", "params": {"pitch": 67, "duration": "1/4", "tie": True}},
             {"action": "addNote", "params": {"pitch": 67, "duration": "1/2", "tie": True}},
@@ -461,12 +461,12 @@ class Step1:
             ("tie to another pitch", lv.tool("write_voice", staff=0, voice=0, measure=first, events=[note([60], "1/4", True), note([62], "1/4")]), "tie"),
             ("tie into a rest", lv.tool("write_voice", staff=0, voice=0, measure=first, events=[note([60], "1/4", True)]), "rest follows"),
             ("empty events", lv.tool("write_voice", staff=0, voice=0, measure=first, events=[]), "empty"),
-            ("start inside a note", lv.tool("write_voice", staff=0, voice=0, tick=start + 120, events=[note([60], "1/4")]), "tick"),
+            ("tick past the end", lv.tool("write_voice", staff=0, voice=0, tick=10 ** 9, events=[note([60], "1/4")]), "tick"),
             # unknown parameters, MCP layer
             ("unknown tool arg", lv.tool("write_voice", staff=0, voice=0, measure=first, events=[note([60], "1/4")], tied=True), "extra inputs"),
             ("tie on add_rest", lv.tool("add_rest", duration="1/4", tie=True, staff=0, voice=0, measure=first), "extra inputs"),
             ("unknown event field", lv.tool("write_voice", staff=0, voice=0, measure=first, events=[{"pitches": [60], "duration": "1/4", "articulation": "staccato"}]), "extra inputs"),
-            ("unknown sequence param", lv.tool("processSequence", sequence=[{"action": "addNote", "params": {"pitch": 60, "duration": "1/4", "tied": True}}]), "extra inputs"),
+            ("unknown sequence param", lv.tool("process_sequence", sequence=[{"action": "addNote", "params": {"pitch": 60, "duration": "1/4", "tied": True}}]), "extra inputs"),
             # the plugin itself, bypassing Python validation
             ("plugin: unknown param", lv.raw("addNote", {"pitch": 60, "duration": "1/4", "tie2": True, "staff": 0, "voice": 0, "measure": first}), "unknown parameter 'tie2'"),
             ("plugin: unknown event field", lv.raw("writeVoice", {"staff": 0, "voice": 0, "measure": first, "events": [{"pitches": [60], "duration": "1/4", "x": 1}]}), "unknown parameter 'x'"),
@@ -493,8 +493,8 @@ class Step1:
         seq = [{"action": "setCursor", "params": {"measure": first, "staff": 0, "voice": 0}}]
         seq += [{"action": "addNote", "params": {"pitch": 60 + i % 12, "duration": "1/8"}} for i in range(128)]
         t0 = time.perf_counter()
-        await lv.tool("processSequence", atomic=True, sequence=seq)
-        self.timings["atomic processSequence, 128 addNote"] = time.perf_counter() - t0
+        await lv.tool("process_sequence", atomic=True, sequence=seq)
+        self.timings["atomic process_sequence, 128 addNote"] = time.perf_counter() - t0
         got = await lv.track(0, 0, start, start + 128 * 240, first, last)
         assert [r[2] for r in got] == [[60 + i % 12] for i in range(128)], "atomic batch wrote the wrong notes"
 

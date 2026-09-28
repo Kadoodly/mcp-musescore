@@ -64,16 +64,21 @@ class MuseScoreClient:
         """Turn the plugin's {status, result} envelope into the result itself.
 
         Errors come back as {"error": message}; non-dict results (e.g. "pong")
-        as {"success": True, "result": value}.
+        as {"success": True, "result": value}. Both carry scoreVersion, the
+        score's version after the request.
         """
         if "status" not in response:
             return response
+        version = response.get("version")
         if response["status"] != "success":
-            return {"error": response.get("message", "Unknown error from MuseScore plugin")}
-        result = response.get("result")
-        if isinstance(result, dict):
-            return result
-        return {"success": True, "result": result}
+            out = {"error": response.get("message", "Unknown error from MuseScore plugin")}
+        else:
+            result = response.get("result")
+            out = result if isinstance(result, dict) else {"success": True, "result": result}
+        # The score version after the request (see get_version / expected_version)
+        if version is not None and "scoreVersion" not in out:
+            out["scoreVersion"] = version
+        return out
 
     async def _send_payload(self, payload: str) -> Dict[str, Any]:
         last_error: Optional[str] = None
@@ -83,10 +88,10 @@ class MuseScoreClient:
                     return {"error": "Not connected to MuseScore"}
 
             try:
-                logger.info(f"Sending command: {payload}")
+                logger.debug("Sending command: %s", payload[:2000])
                 await self.websocket.send(payload)
                 response = await self.websocket.recv()
-                logger.info(f"Received response: {response}")
+                logger.debug("Received response: %s", response[:2000])
                 return json.loads(response)
             except Exception as e:
                 last_error = str(e)

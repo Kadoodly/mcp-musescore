@@ -12,7 +12,9 @@ needs_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
 
 
 def run_node(*args, stdin=None):
-    return subprocess.run([NODE, *args], cwd=ROOT, input=stdin, capture_output=True, text=True, timeout=120)
+    # node writes UTF-8; Windows would otherwise decode pipes as cp1252
+    return subprocess.run([NODE, *args], cwd=ROOT, input=stdin, capture_output=True, text=True, encoding="utf-8",
+                          timeout=120)
 
 
 @pytest.fixture(scope="session")
@@ -46,3 +48,58 @@ def server():
     client = FakeClient()
     app = server_module.create_server(client)
     return app, client
+
+
+class MockPluginClient:
+    """A MuseScoreClient stand-in that talks to the plugin running on the mock
+    MuseScore API in node (tests/js/mock_server.js). Not MuseScore: it checks
+    the Python server and the plugin's logic together."""
+
+    def __init__(self, **opts):
+        self.proc = subprocess.Popen([NODE, "tests/js/mock_server.js", json.dumps(opts)], cwd=ROOT,
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8",
+                                     bufsize=1)
+        self.sent = []
+
+    def _roundtrip(self, message):
+        self.proc.stdin.write(json.dumps(message) + "\n")
+        self.proc.stdin.flush()
+        line = self.proc.stdout.readline()
+        assert line, "mock server died"
+        return json.loads(line)
+
+    async def connect(self):
+        return True
+
+    async def send_command(self, action, params=None):
+        from src.client.websocket_client import MuseScoreClient
+
+        self.sent.append((action, params or {}))
+        return MuseScoreClient._unwrap(self._roundtrip({"action": action, "params": params or {}}))
+
+    def mock(self, js):
+        """Evaluates JS with `ms` (the MockMuseScore) in scope, e.g. a user edit."""
+        return self._roundtrip({"__mock": js})["mock"]
+
+    def close(self):
+        self.proc.stdin.close()
+        self.proc.wait(timeout=10)
+
+
+@pytest.fixture
+def mock_server():
+    """(app, client): the MCP server wired to the plugin on the mock API."""
+    if NODE is None:
+        pytest.skip("node is not installed")
+    import server as server_module
+
+    clients = []
+
+    def make(**opts):
+        client = MockPluginClient(**opts)
+        clients.append(client)
+        return server_module.create_server(client), client
+
+    yield make
+    for c in clients:
+        c.close()

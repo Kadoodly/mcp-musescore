@@ -1,6 +1,6 @@
 # MuseScore MCP Server
 
-A Model Context Protocol (MCP) server that provides programmatic control over MuseScore, via a WebSocket-based plugin system. This allows AI assistants like Claude to compose music, add lyrics, navigate scores, and control MuseScore directly.
+A Model Context Protocol (MCP) server that lets AI assistants like Claude read, analyze, compose, arrange and edit the score open in MuseScore Studio 4, through a WebSocket plugin. Claude reads the score in a compact notation (`C4:q D4 [C4 E4 G4]:h~ ...`) and writes in the same notation, a whole passage or several staves per call, each call one undo step, while you keep working in MuseScore.
 
 ![Demo GIF](./assets/mcp-muse.gif)
 
@@ -115,17 +115,19 @@ Offline tests (no MuseScore needed; the plugin tests need [node](https://nodejs.
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest            # Python logic, strict validation, and the plugin's JavaScript
+python -m pytest            # Python logic, strict validation, notation, the plugin's JavaScript, end to end
 node syntax_check.js        # syntax check of the plugin (QML converted to JS, node --check)
+node tests/js/test_plugin.js
 ```
 
-The plugin's JavaScript is also run against a small mock of MuseScore's plugin API (`tests/js/`). That tests the plugin's own logic, not MuseScore: the live test does that. To run it, open a score saved as `mcp test` (a piano score, so there are two staves), start the plugin, and run:
+The plugin's JavaScript is run against a mock of MuseScore's plugin API (`tests/js/mock_musescore.js`), and `tests/test_end_to_end.py` runs the real MCP server against the plugin on that mock (`tests/js/mock_server.js`). That tests the plugin's and the server's own logic, not MuseScore: the live tests do that. To run them, open a score saved as `mcp test` (a piano score, so there are two staves), start the plugin, and run:
 
 ```bash
-python tests/live/test_step1.py            # keeps its bars so you can check them; --cleanup deletes them
+python tests/live/test_all.py              # everything; keeps its bars so you can look at them (--cleanup deletes them)
+python tests/live/test_step1.py            # the step 1 checks (batches, write_voice, ties)
 ```
 
-It refuses to run unless every MuseScore window title contains "mcp test", only writes into bars it appends after the last bar, and checks that the original bars are unchanged. See the docstring of `tests/live/test_step1.py` for details.
+They refuse to run unless every MuseScore window title contains "mcp test", only write into bars they append after the last bar, and check that the original bars are unchanged. See the docstrings for details.
 
 ### Viewing Console Output
 
@@ -148,94 +150,57 @@ musescore4
 
 ## Features
 
-This MCP server provides comprehensive MuseScore control.
+70 tools; `skills/mcp-musescore/references/tools.md` is the full reference.
 
-**🌟 NEW in this fork:** Built-in automatic, flawless multi-voice Polyphony & Temporal layout mapping to LilyPond!
+### Reading scores
+- `get_score(format, start_measure, end_measure, staves)` - The score in a compact notation, bar by bar and staff by staff, with the instruments (staff numbers, clefs, ranges), key, meter, tempo, markings, the score's version and the cursor. Identical bars and empty bars are collapsed, so long scores stay short. `format="json"` gives the raw data, `"lilypond"` LilyPond.
+- `analyze_score()`, `analyze_harmony(...)`, `analyze_phrases(...)`, `analyze_structure()`, `analyze_rhythm(...)`, `get_tempo_map()` - Musical descriptions: key and mode, chords with Roman numerals and loops, phrases, form, rhythm, tempo. Positions as bar.beat.
+- `get_selection()` - What you selected in MuseScore ("change these bars"), with its music.
+- `open_score(path)` - Open a file (mscz, MusicXML, MIDI, ...) when no score is open.
+- `list_instruments(query, group, instrument_id)` - MuseScore's instrument ids with clefs, transpositions, ranges and drum maps.
 
-### The cursor: staff, voice and position
+```
+Score "Nocturne" · by Claude · 16 bars · 4/4 · version 1234502
+Staves: s0 Flute [flute] treble, range C4-A6 | s1 Piano [piano] treble, range A0-C8 | s2 Piano [piano] bass, range A0-C8
+Key: Eb major / C minor (-3)
+bar 1 (4/4) tempo q=72 "Lento"
+  s0: r:q G4(mf "Hel-") Bb4("lo") Eb5~
+  s1: [Eb4 G4 Bb4]:h [Eb4 Ab4 C5](chord=Ab/Eb)
+  s2: Eb2:w
+bar 2 = bar 1
+bars 3-4: rests
+```
 
-The plugin keeps its own write cursor: a tick position (480 ticks per quarter note), a staff (0-based) and a voice (0–3; 0 is MuseScore's voice 1). Every write tool writes at the cursor, or at an explicit position:
+### Writing music
+- `write_voice(notation | events, staff, voice, measure, offset, tick)` - **The main way to write**: a whole passage in one staff and voice, one call, one undo step, checked before anything is written. Notation: `C4:q D4 E4:e F4 | [C4 E4 G4]:h~ [C4 E4 G4]:q r | {3:2 C5:e B4 A4} G4:q.(mf staccato "la")` - note names keep their spelling, durations carry over, `~` ties, `{3:2 ...}` tuplets, markings in parentheses (dynamics, articulations, ornaments, bowings, fermatas, lyrics, text, chord symbols).
+- `replace_section(start_measure, end_measure, parts)` - New music for whole bars on several staves/voices at once, one undo step; also appends bars at the end.
+- `add_note`, `add_rest`, `add_tuplet`, `add_lyrics` - Single corrections.
+- `process_sequence(sequence, atomic)` - Several different actions in one round trip; `atomic=True` makes them one undo step (all or nothing).
 
-- `staff` / `voice`: write on that staff/voice. The choice sticks, so later calls keep writing there.
-- `measure` (1-based) or `tick`: write at that position instead of at the cursor.
+Writing can start anywhere (`measure` + `offset` inside the bar, e.g. `"3/8"`): a note held across the start is shortened, never re-struck. Durations that aren't one note value (`"5/8"`) or cross a barline are written as tied notes that add up exactly; nothing is shortened silently.
 
-Clicking a note or selecting a range in MuseScore moves the cursor there. Measures are appended automatically when writing past the end of the score.
+### Changing what is there
+- `transpose(semitones, range, staves, chord_symbols, key_signatures)` - Chromatic transposition with correct spelling; chord symbols move too; `key_signatures=True` changes the key of a piece or section.
+- `clear_range(range, staves, voices, markings)` - Empty a range cleanly (whole bars get one bar rest).
+- `copy_measures(..., to_staff, transpose)` - Copy bars, also onto other staves and transposed (double a melody an octave higher).
+- `delete_measures`, `insert_measure`, `append_measure`, `delete_selection`
+- `undo(steps)` / `redo(steps)`
 
-The score and MuseScore's visible selection are kept apart: edits change the score and move the plugin cursor; the selection is moved to the cursor once, at the end of a call or batch, not after every note.
+### Markings, text and layout
+- `add_dynamic`, `add_fermata`, `add_text` (staff/system/expression), `add_chord_symbol`, `add_pedal_marks` (symbols), `add_clef`
+- `set_tempo(bpm, beat_unit, text)`, `add_tempo_change` (rit./accel. with real playback change), `set_time_signature`, `set_key_signature`
+- `add_slur`, `add_hairpin`, `add_articulation`, `add_repeat` / `remove_repeat`, `add_marker`, `add_jump`, `add_section_label`, `remove_marking`
+- `add_layout_break(line|page|section)`, `set_measures_per_system(count)`
 
-### Strict arguments
+### Score, instruments, files
+- `set_score_info(title, subtitle, composer, lyricist)`
+- `add_instrument(id, position)`, `set_instrument_name`, `remove_instrument`, `set_instrument_sound`
+- `export_score(path, format, overwrite)` (pdf, png, svg, mid, musicxml, mxl, mei, mscz; audio only through MuseScore's File → Export), `save_score()`, `open_score(path)` (when no score is open), `check_score`
 
-Unknown arguments are errors, at the MCP layer and inside the plugin (which has a list of allowed params per action). If Claude sends `tie=true` to a tool that has no `tie`, the call fails instead of silently doing something else.
-
-### **Navigation & Cursor Control**
-- `get_cursor_info()` - Cursor position (measure, beat, tick, staff, voice) and the note/rest there
-- `set_cursor(measure, tick, staff, voice)` - Move the cursor; every argument optional
-- `go_to_measure(measure, staff, voice)` - Navigate to a measure (1-based)
-- `go_to_beginning_of_score()` / `go_to_final_measure()` - Navigate to start/end
-- `next_element(n)` / `prev_element(n)` - Move by notes/rests in the current staff and voice
-- `next_staff()` / `prev_staff()` - Move between staves
-- `select_current_measure(all_staves)` - Select the cursor's measure
-- `select_custom_range(start_tick, end_tick, start_staff, end_staff)` - Select a tick range; both staff bounds inclusive
-
-### **Polyphony & LilyPond Integration**
-- **Temporal Rhythm Padding**: Voices with gaps or rests automatically receive LilyPond spacer sequences (`s4.`) to hold their mathematical place accurately.
-- **Concurrent Voice Rendering**: Full 4-voice (`\voiceOne`, `\voiceTwo`, etc.) arrays correctly structured and sharded per staff for advanced Agent processing.
-
-### **Note & Rest Creation**
-All of these accept optional `staff`, `voice`, `measure` and `tick`.
-- `write_voice(events)` - **The main way to write music**: a whole passage of notes, chords, rests and ties in one staff and voice, in one call and one undo step. Events look like `{"pitches": [60], "duration": "1/8"}`, `{"pitches": [48, 52, 55], "duration": "1/2", "tie": true}` or `{"rest": true, "duration": "1/4"}`.
-- `add_note(pitch, duration, advance_cursor_after_action, add_to_chord, tie)` - Add a note with MIDI pitch, for small corrections. Sequential notes write a melody; `add_to_chord=True` stacks a pitch on the chord just written; `tie=True` ties it to the next note of the same pitch in that voice.
-- `add_rest(duration, advance_cursor_after_action)` - Add rests
-- `add_tuplet(duration, ratio)` - Create a tuplet; the cursor stays at its start so the next `add_note` calls fill it
-
-Durations are fractions of a whole note (`"1/4"`, `"3/8"`, ...). MuseScore only writes one plain, dotted or double-dotted value per note, so any other duration, or one crossing a barline, is split (at barlines first, then into the longest values that fit) and the pieces are tied: `"5/8"` becomes a half tied to an eighth. Nothing is shortened silently; durations that need a tuplet (`"1/12"`) are an error.
-
-### **Markings**
-- `add_dynamic(dynamic)` - pp, p, mp, mf, f, ff, sfz, fp, …
-- `add_fermata()` - Fermata on the note/rest at the cursor
-- `set_tempo(bpm, text)` - Tempo marking, e.g. `set_tempo(96, "Allegretto")`
-- `add_tempo_change(type, measure, end_measure, target_bpm, factor, a_tempo)` - rit./rall./accel. with real playback change (visible marking + hidden tempo steps)
-- `set_time_signature(numerator, denominator, measure)` - Change time signature
-- `add_slur(...)`, `add_hairpin(type, ...)`, `add_articulation(type, ...)` - Over a tick range or whole bars on one staff
-- `remove_marking(kind, tick/measure, staff)` - Remove a tempo mark, dynamic, fermata, text, label, chord symbol, slur, hairpin, …
-
-### **Measure Management & Form**
-- `insert_measure(measure, count)` - Insert empty measures before a measure
-- `append_measure(count)` - Add measures to end of score
-- `delete_selection(measure, staff)` - Delete the current selection, or clear a measure
-- `delete_measures(start_measure, end_measure)` - Remove whole bars
-- `copy_measures(start_measure, end_measure, to_measure, insert, staff)` - Copy a passage (e.g. write out a reprise), into new bars or over existing ones
-- `add_repeat(start_measure, end_measure, times)` / `remove_repeat(...)` - Repeat barlines
-- `add_marker(type, measure)` - Segno, Coda, Fine, To Coda
-- `add_jump(type, measure)` - D.C., D.S., al Fine, al Coda
-- `add_section_label(text, measure)` - Rehearsal mark such as "Chorus"
-- `set_key_signature(fifths, measure, mode, staff)` - Key change
-
-### **Lyrics**
-- `add_lyrics(lyrics, verse)` - Add syllables to consecutive notes. End a syllable with `-` to hyphenate it with the next (`["Twin-", "kle"]`); `_` skips a note. Re-adding replaces existing lyrics in that verse instead of duplicating them.
-
-### **Instruments**
-- `add_instrument(instrument_id)` - Add an instrument, e.g. `"violin"`, `"flute"`, `"piano"`
-- `remove_instrument(part | staff)` - Remove an instrument by part index or any of its staff indices
-- `set_instrument_sound(staff, instrument_id)` - Replace the instrument on a staff's part
-
-### **Music Analysis**
-These read the score and describe it musically, so Claude has reliable facts before it edits or writes. Positions are given as bar.beat (`4.2+3/16` = bar 4, beat 2, plus three 16ths).
-- `analyze_score()` - Overview: key and mode, meter, tempo, form, main progressions, melody and rhythm traits, dynamics
-- `analyze_harmony(start_measure, end_measure, resolution, include_melody)` - Chords per beat with bass notes and Roman numerals, chord loops, harmonic rhythm, written chord symbols
-- `analyze_phrases(staff, start_measure, end_measure)` - Melodic phrases with pickups, range, contour, ending note/chord, lyrics, and which phrases repeat or vary each other
-- `analyze_structure()` - Sections (intro/verse/chorus/bridge guesses), repeated passages, repeat signs, voltas, D.C./D.S./Coda, rehearsal marks
-- `analyze_rhythm(start_measure, end_measure, staff)` - Meter and beat grouping, pickup/irregular bars, note values, on/off-beat attacks, tuplets, syncopations and anticipations, swing
-- `get_tempo_map()` - Tempo marks (quarter and felt beat), misplaced/redundant marks, rit./accel., tempo per bar, fermatas, total time
-
-### **Score Information**
-- `get_score(format, start_measure, end_measure)` - Title, key signature, time signatures, tempos, the instrument on each staff, the cursor, and the music as LilyPond (or `format="json"` for the full raw data, including lyric verse/syllabic and markings)
-- `ping_musescore()` - Test connection to MuseScore
-- `connect_to_musescore()` - Establish WebSocket connection
-
-### **Utilities**
-- `undo(steps)` - Undo like Ctrl+Z; the cursor returns to where it was
-- `processSequence(sequence, atomic)` - Execute multiple commands in batch; every step is checked first, and it stops at the first failing step. With `atomic=True` the batch is one undo step and nothing is kept if a step fails. The view is updated once at the end, not per step
+### Working alongside you
+- Every change raises the score's **version**, whether Claude made it or you did in MuseScore. Edits can carry `expected_version`: if you changed the score since Claude read it, the edit is refused instead of overwriting your work, and `get_changes_since(version)` shows Claude what you changed.
+- The plugin's write cursor and MuseScore's selection are kept apart: Claude's edits don't jump your view around; the selection is moved once at the end of a call. Clicking a note in MuseScore moves Claude's cursor there.
+- Unknown arguments are errors, at the MCP layer and in the plugin, so Claude always knows whether a feature exists.
 
 ## Sample Music
 
@@ -251,52 +216,35 @@ Each example includes:
 
 ## Usage Examples
 
-### Creating a Simple Melody
+Just ask Claude, e.g. "Read the score and add a flute counter-melody in bars 9-16", "Transpose the song to G major", "Write a 16-bar piano intro in the style of the verse", "What chords are in the chorus?". Under the hood the calls look like this:
 
 ```python
-await go_to_measure(1, staff=0)
+await get_score(start_measure=1, end_measure=8)
 
-# A melody in one call (MIDI pitch: 60=C, 62=D, 64=E, etc.), one undo step
-await write_voice([
-    {"pitches": [60], "duration": "1/4"},
-    {"pitches": [64], "duration": "1/4"},
-    {"pitches": [67], "duration": "1/4"},
-    {"pitches": [72], "duration": "1/4", "tie": True},   # tied over the barline
-    {"pitches": [72], "duration": "1/2"},
-    {"rest": True, "duration": "1/2"},
-], staff=0, voice=0, measure=1)
+# A melody in one call, one undo step
+await write_voice(notation='C5:q E5 G5 C6~ | C6:h r:h', staff=0, voice=0, measure=1)
 
-# Chords on the second staff
-await write_voice([
-    {"pitches": [48, 52, 55], "duration": "1/1"},
-    {"pitches": [43, 50, 53], "duration": "5/8"},        # written as 1/2 tied to 1/8
-    {"pitches": [48, 52, 55], "duration": "3/8"},
-], staff=1, measure=1)
+# Two staves at once, for bars 3-4
+await replace_section(start_measure=3, end_measure=4, parts=[
+    {"staff": 0, "notation": 'E5:q(mf "Hel-") D5("lo") C5:h | {3:2 D5:e E5 D5} C5:q G4:h'},
+    {"staff": 1, "notation": "[C3 G3]:w | [G2 D3]:h [C3 G3]"},
+])
 
-# A small correction
-await add_note(62, "1/4", measure=1)
+# Somewhere in the middle of a bar, without touching the rest
+await write_voice(notation="B4:e C5", measure=4, offset="3/4", staff=0)
 
-# Lyrics on the melody, dynamics and tempo
-await add_lyrics(["Do", "mi", "sol", "do"], staff=0, measure=1)
-await add_dynamic("mf", staff=0, measure=1)
-await set_tempo(96, "Moderato", measure=1)
-```
+# The user may be editing too: refuse if the score changed since version 1234502
+await write_voice(notation="G4:w", measure=5, staff=0, expected_version=1234502)
+await get_changes_since(1234502)
 
-### Batch Operations
+# Several different edits as one undo step
+await process_sequence([
+    {"action": "writeVoice", "params": {"staff": 0, "measure": 5, "notation": "C5:q D5 E5 F5"}},
+    {"action": "addChordSymbol", "params": {"text": "C", "measure": 5}},
+    {"action": "addDynamic", "params": {"dynamic": "p", "measure": 5, "staff": 0}},
+], atomic=True)
 
-```python
-# Add multiple lyrics at once (a trailing "-" hyphenates to the next syllable)
-await add_lyrics(["Twin-", "kle", "twin-", "kle", "lit-", "tle", "star"])
-
-# Use sequence processing for several operations in one round trip (atomic: one undo step)
-sequence = [
-    {"action": "writeVoice", "params": {"measure": 1, "staff": 0, "events": [
-        {"pitches": [60], "duration": "1/2"}, {"pitches": [64], "duration": "1/2"}]}},
-    {"action": "writeVoice", "params": {"measure": 1, "staff": 1, "events": [
-        {"pitches": [48], "duration": "1/1"}]}},
-    {"action": "addDynamic", "params": {"dynamic": "mf", "staff": 0, "measure": 1}},
-]
-await processSequence(sequence, atomic=True)
+await transpose(semitones=7, start_measure=1, end_measure=16, key_signatures=True)   # C major -> G major
 ```
 
 ## Star History
@@ -330,59 +278,53 @@ await processSequence(sequence, atomic=True)
 - **Connection timeout**: The MuseScore plugin must be actively running, not just enabled
 
 ### API Limitations
-- **Undo cursor tracking**: `undo` restores the plugin's cursor for actions done through the plugin; undoing in MuseScore itself (Ctrl+Z) doesn't move the cursor
-- **`set_staff_mute`**: not reliable in MuseScore 4; use the mixer instead
-- **Voltas (1st/2nd endings)** and real rit./accel. lines can't be added through MuseScore 4.7's plugin API; add voltas from the palette. `add_tempo_change` writes the tempo change as hidden tempo marks instead
-- **Selection-based edits** (insert/delete bars, copy, slurs, hairpins, articulations) are MuseScore's own actions: each is its own undo step, and `copy_measures` uses the clipboard
-- **Selection**: write actions select the note/rest at the cursor (once per call or batch) so you can see where it is
-- **`write_voice`** can't yet start inside a held note or write over tuplets (use `add_tuplet` + `add_note` for tuplets); writing over part of a held note turns the rest of it into a rest (reported in `warnings`)
-- **Ties** are made with MuseScore's own tie command, so the note to tie to (same pitch, same voice, right after) must exist by the end of the call or atomic batch; ties can't cross a repeat barline. Making a tie leaves note-input mode
+- **Not possible through MuseScore 4.7's plugin API**: voltas (1st/2nd endings), pedal lines (`add_pedal_marks` writes the symbols only, without playback), real rit./accel. lines (`add_tempo_change` writes hidden tempo marks instead), grace notes, pickup bars, creating a new score, opening a second score while one is open (MuseScore opens it in another window)
+- **Muting/soloing**: MuseScore 4's mixer is not reachable from plugins (the old `set_staff_mute` tool was removed: the channel mute it relied on does nothing since MuseScore 4.0); use the mixer
+- **Selection-based edits** (insert/delete bars, copy, slurs, hairpins, `add_articulation`, `set_measures_per_system`) are MuseScore's own actions: each is its own undo step and they can't be in an atomic batch; `copy_measures` uses the clipboard
+- **Tuplets**: `write_voice` writes new tuplets, but can't write into the middle of an existing one (clear it first)
+- **Ties** are made with MuseScore's own tie command, so the note to tie to (same pitch, same voice, right after) must exist by the end of the call or atomic batch; ties can't cross a repeat barline
+- **Edits made in MuseScore** are noticed when Claude next reads the score or uses `expected_version` (MuseScore doesn't notify plugins)
+- **Undo**: `undo` restores the plugin's cursor for actions done through the plugin; undoing in MuseScore itself (Ctrl+Z) doesn't move it
 
 ## File Structure
 
 ```
 mcp-musescore/
-├── .venv/
-├── server.py                           # Python MCP server entry point
+├── server.py                           # Python MCP server entry point (tools + instructions for Claude)
 ├── musescore-mcp-websocket.qml         # MuseScore plugin
 ├── syntax_check.js                     # node syntax check of the plugin
-├── requirements.txt
-├── requirements-dev.txt                # + pytest
-├── README.md
-├── tests/                              # pytest; js/ = plugin tests on a mock API; live/ = against MuseScore
-└── src/                                # Source code modules
-    ├── __init__.py
-    ├── client/                         # WebSocket client functionality
-    │   ├── __init__.py
-    │   └── websocket_client.py
-    ├── tools/                          # MCP tool implementations
-    │   ├── __init__.py
-    │   ├── connection.py               # Connection management tools
-    │   ├── navigation.py               # Score navigation tools
-    │   ├── notes_measures.py           # Note and measure manipulation
-    │   ├── sequences.py                # Batch operation tools
-    │   ├── staff_instruments.py        # Staff and instrument tools
-    │   └── time_tempo.py               # Time signature, tempo and markings
-    ├── analysis/                       # Harmony, phrases, form, rhythm, tempo
-    ├── types/                          # Type definitions
-    │   ├── __init__.py
-    │   └── action_types.py             # WebSocket action type definitions (strict)
+├── requirements.txt / requirements-dev.txt
+├── scripts/generate_instruments.py     # builds src/data/instruments.json from MuseScore's instruments.xml
+├── skills/mcp-musescore/               # Skill for Claude Code (SKILL.md, references/tools.md)
+├── tests/                              # pytest; js/ = plugin on a mock API; live/ = against MuseScore
+└── src/
+    ├── client/websocket_client.py      # WebSocket client
+    ├── notation.py                     # The compact notation (parsing, durations, pitch names)
+    ├── score_view.py                   # get_score's compact view
+    ├── instruments.py, data/           # MuseScore 4.7.5's instrument list
     ├── validation.py                   # Strict tool arguments, write_voice events
-    └── utils/
-        ├── durations.py                # Duration parsing and splitting into tied notes
-        └── lilypond_converter.py       # Score JSON → LilyPond
+    ├── tools/                          # MCP tools
+    │   ├── score_state.py              # get_score, versions, changes, selection, instruments, open_score
+    │   ├── notes_measures.py           # write_voice, add_note, ..., undo/redo
+    │   ├── editing.py                  # replace_section, transpose, clear_range, text, clefs, layout, files
+    │   ├── structure_edit.py           # repeats, jumps, keys, tempo changes, slurs, copy/delete bars
+    │   ├── time_tempo.py, staff_instruments.py, navigation.py, connection.py, analysis.py
+    │   └── sequences.py                # process_sequence
+    ├── analysis/                       # Harmony, phrases, form, rhythm, tempo
+    ├── types/action_types.py           # Strict types of every plugin action
+    └── utils/                          # Durations (splitting into tied notes), LilyPond
 ```
 
 ## MIDI Pitch Reference
 
 Common MIDI pitch values for reference:
-- **Middle C**: 60
+- **Middle C**: 60 (C4; tools also take note names like `"F#4"`, which keep their spelling)
 - **C Major Scale**: 60, 62, 64, 65, 67, 69, 71, 72
 - **Chromatic**: C=60, C#=61, D=62, D#=63, E=64, F=65, F#=66, G=67, G#=68, A=69, A#=70, B=71
 
 ## Duration Reference
 
-Duration format: `"numerator/denominator"` (or `{"numerator": int, "denominator": int}`)
+Duration format: `"numerator/denominator"` (or `{"numerator": int, "denominator": int}`); in notation also the letters `w h q e s t x` with dots (`q.` = `"3/8"`)
 - **Whole note**: `"1/1"`
 - **Half note**: `"1/2"`
 - **Quarter note**: `"1/4"`

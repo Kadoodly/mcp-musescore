@@ -3,6 +3,7 @@
 from typing import Any, Dict, Optional
 
 from ..client import MuseScoreClient
+from ..types import Offset
 from ..utils.lilypond_converter import json_to_lilypond
 
 
@@ -11,12 +12,20 @@ def position_params(
     tick: Optional[int] = None,
     staff: Optional[int] = None,
     voice: Optional[int] = None,
+    offset: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the optional position params understood by the plugin."""
     params: Dict[str, Any] = {}
-    for key, value in (("measure", measure), ("tick", tick), ("staff", staff), ("voice", voice)):
+    for key, value in (("measure", measure), ("tick", tick), ("staff", staff), ("voice", voice), ("offset", offset)):
         if value is not None:
             params[key] = value
+    return params
+
+
+def with_version(params: Dict[str, Any], expected_version: Optional[int]) -> Dict[str, Any]:
+    """Adds expectedVersion: the plugin refuses the edit if the score changed since."""
+    if expected_version is not None:
+        params["expectedVersion"] = expected_version
     return params
 
 
@@ -40,6 +49,7 @@ def setup_navigation_tools(mcp, client: MuseScoreClient):
     @mcp.tool()
     async def set_cursor(
         measure: Optional[int] = None,
+        offset: Optional[Offset] = None,
         tick: Optional[int] = None,
         staff: Optional[int] = None,
         voice: Optional[int] = None,
@@ -48,22 +58,25 @@ def setup_navigation_tools(mcp, client: MuseScoreClient):
 
         Args:
             measure: Measure number (1-based); moves to the start of that measure.
-            tick: Absolute position in ticks (480 per quarter note). Takes precedence over measure.
+            offset: With measure: position inside it, as a fraction of a whole note ("1/4" = beat 2 in 4/4).
+            tick: Absolute position in ticks (480 per quarter note), instead of measure.
             staff: Staff index (0-based, see get_score for which instrument is on which staff).
             voice: Voice 0-3 (0 is MuseScore's voice 1).
         """
-        return await client.send_command("setCursor", position_params(measure, tick, staff, voice))
+        return await client.send_command("setCursor", position_params(measure, tick, staff, voice, offset))
 
     @mcp.tool()
-    async def go_to_measure(measure: int, staff: Optional[int] = None, voice: Optional[int] = None):
-        """Move the cursor to the start of a measure (1-based), optionally also changing staff/voice.
+    async def go_to_measure(measure: int, offset: Optional[Offset] = None, staff: Optional[int] = None,
+                            voice: Optional[int] = None):
+        """Move the cursor to a measure (1-based), optionally also changing staff/voice.
 
         Args:
             measure: Measure number, starting at 1.
+            offset: Position inside the measure ("1/4" = beat 2 in 4/4). Default: its start.
             staff: Staff index (0-based). Default: keep the current staff.
             voice: Voice 0-3. Default: keep the current voice.
         """
-        return await client.send_command("goToMeasure", position_params(measure, None, staff, voice))
+        return await client.send_command("goToMeasure", position_params(measure, None, staff, voice, offset))
 
     @mcp.tool()
     async def go_to_final_measure():

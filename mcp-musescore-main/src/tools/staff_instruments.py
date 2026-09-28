@@ -9,17 +9,40 @@ def setup_staff_instruments_tools(mcp, client: MuseScoreClient):
     """Setup staff and instrument tools."""
 
     @mcp.tool()
-    async def add_instrument(instrument_id: str):
-        """Add a new instrument (part) at the bottom of the score.
+    async def add_instrument(instrument_id: str, position: Optional[int] = None):
+        """Add an instrument (part, with all its staves) to the score. list_instruments gives the ids,
+        ranges and clefs.
 
         Args:
-            instrument_id: MuseScore instrument id, e.g. "piano", "violin", "flute", "cello",
-                "soprano", "acoustic-guitar", "drumset". The result reports the new part's staves;
-                it warns if the id was unknown and MuseScore substituted another instrument.
+            instrument_id: MuseScore instrument id, e.g. "piano", "violin", "flute", "cello", "soprano",
+                "guitar-steel", "drumset". The result reports the new part's staves; with the default
+                position it warns if the id was unknown and MuseScore substituted another instrument.
+            position: Part index to insert it at (0 = top). Default: at the bottom.
         """
-        return await client.send_command("addInstrument", {
-            "instrumentId": instrument_id
-        })
+        params = {"instrumentId": instrument_id}
+        if position is not None:
+            params["position"] = position
+        return await client.send_command("addInstrument", params)
+
+    @mcp.tool()
+    async def set_instrument_name(
+        name: Optional[str] = None,
+        short_name: Optional[str] = None,
+        staff: Optional[int] = None,
+        part: Optional[int] = None,
+    ):
+        """Rename an instrument (part), e.g. "Violin I" / "Vln. I", or "Soprano" for a vocal line: the
+        name before the first system and the short name before the others.
+
+        Args:
+            name: The full name.
+            short_name: The short name.
+            staff: Any staff of the part (default: the cursor's staff).
+            part: Or the part index.
+        """
+        params = {k: v for k, v in (("name", name), ("shortName", short_name), ("staff", staff), ("part", part))
+                  if v is not None}
+        return await client.send_command("setInstrumentName", params)
 
     @mcp.tool()
     async def remove_instrument(part: Optional[int] = None, staff: Optional[int] = None):
@@ -38,19 +61,6 @@ def setup_staff_instruments_tools(mcp, client: MuseScoreClient):
         if staff is not None:
             params["staff"] = staff
         return await client.send_command("removeInstrument", params)
-
-    @mcp.tool()
-    async def set_staff_mute(staff: int, mute: bool):
-        """Mute or unmute a staff.
-
-        Args:
-            staff: Staff number (0-based)
-            mute: True to mute, False to unmute
-        """
-        return await client.send_command("setStaffMute", {
-            "staff": staff,
-            "mute": mute
-        })
 
     @mcp.tool()
     async def set_instrument_sound(staff: int, instrument_id: str):

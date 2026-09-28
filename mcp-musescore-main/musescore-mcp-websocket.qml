@@ -809,7 +809,12 @@ MuseScore {
     function selectRangeInclusive(startTick, endTick, startStaff, endStaff) {
         var sel = curScore.selection;
         sel.clear();
-        var ok = sel.selectRange(startTick, endTick, startStaff, endStaff + 1);
+        // selectRange ends the range at the segment at or before endTick
+        // (Score::tick2leftSegmentMM): at the very end of the score that is the
+        // last note or rest, which would be left out. Past the end there is no
+        // segment, and the range goes to the end of the score.
+        var end = endTick >= scoreEndTick() ? scoreEndTick() + 1 : endTick;
+        var ok = sel.selectRange(startTick, end, startStaff, endStaff + 1);
         // A plugin range selection only sets its bounds; MuseScore fills in the
         // selected notes (needed by slurs, hairpins, ...) when a command ends.
         // An empty command does that and leaves no undo step.

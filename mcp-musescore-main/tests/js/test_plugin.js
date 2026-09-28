@@ -906,10 +906,25 @@ test('addClef, addLayoutBreak, setMeasuresPerSystem', () => {
     assert.deepStrictEqual(ms.state.measures[1].elements.map(e => [e.type, e.layoutBreakType]), [[Element.LAYOUT_BREAK, LayoutBreak.LINE]]);
     fails(ms.call('addLayoutBreak', { type: 'column', measure: 2 }), /type must be line, page or section/);
     ok(ms.call('setMeasuresPerSystem', { count: 4 }));
-    assert.strictEqual(ms.state.locks, 4);
+    assert.deepStrictEqual(ms.state.locks, { interval: 4, start: 0, end: ms.endTick });   // the whole score
     ok(ms.call('setMeasuresPerSystem', { count: 0 }));
     assert.strictEqual(ms.state.locks, null);
     fails(ms.call('processSequence', { atomic: true, sequence: [{ action: 'setMeasuresPerSystem', params: { count: 4 } }] }), /can't be part of an atomic sequence/);
+});
+
+test('ranges that reach the end of the score include the last bar', () => {
+    // Selection.selectRange ends at the segment at or before endTick: at the very end of
+    // the score that is the last note, which would be left out (seen live: deleting the
+    // test bars left the last one)
+    const ms = fresh();
+    ok(ms.call('writeVoice', { measure: 4, events: [notes([60], '1/4'), notes([62], '1/4'), notes([64], '1/4'), notes([65], '1/4')] }));
+    ok(ms.call('copyMeasures', { startMeasure: 4, toMeasure: 1, insert: false }));
+    assert.strictEqual(ms.brief(0, 0, WHOLE), ms.brief(0, 3 * WHOLE, 4 * WHOLE));
+    ok(ms.call('selectCustomRange', { startTick: 2 * WHOLE, endTick: 4 * WHOLE, startStaff: 0, endStaff: 1 }));
+    const sel = ok(ms.call('getSelection'));
+    assert.deepStrictEqual([sel.startMeasure, sel.endMeasure], [3, 4]);
+    ok(ms.call('deleteMeasures', { startMeasure: 3, endMeasure: 4 }));
+    assert.strictEqual(ms.state.measures.length, 2);
 });
 
 test('setTempo: beat units and text; the tempo map is reported', () => {

@@ -822,9 +822,23 @@ class MockMuseScore {
                 eng.selection = { kind: 'list', els: [{ kind: 'note', id: el.__id }], range: null };
                 return true;
             },
+            // Selection::selectRange finds both ends with Score::tick2leftSegmentMM: the
+            // segment at the tick, else the one before it in that bar. At the very end of
+            // the score that is the last segment (the last note is left out); past the end
+            // there is none, and the range goes to the end of the score.
             selectRange(st, et, s0, s1) {
                 eng.counters.selectRange++;
-                eng.selection = { kind: 'range', els: [], range: { start: st, end: et, s0, s1 } };
+                const left = t => {
+                    if (t > eng.endTick) return null;
+                    const ms = eng.state.measures;
+                    const mi = eng.measureIndexAt(Math.max(t, 0));
+                    const m = mi >= 0 ? ms[mi] : ms[ms.length - 1];
+                    const ticks = eng.segmentTicks().filter(x => x >= m.tick && x < m.tick + m.ticks && x <= t);
+                    return ticks.length ? ticks[ticks.length - 1] : null;
+                };
+                const a = left(st), b = left(et);
+                if (a === null || (b !== null && !(b > a))) return false;
+                eng.selection = { kind: 'range', els: [], range: { start: a, end: b === null ? eng.endTick : b, s0, s1 } };
                 return true;
             },
             clear() {
@@ -889,7 +903,8 @@ class MockMuseScore {
             addRemoveSystemLocks(interval, lock) {
                 eng.requireOpen('addRemoveSystemLocks');
                 if (eng.selection.kind !== 'range') return;          // works on the selected bars
-                eng.state.locks = lock ? 'as laid out' : (interval || null);
+                const r = eng.selection.range;
+                eng.state.locks = lock ? 'as laid out' : (interval ? { interval, start: r.start, end: r.end } : null);
             },
             get nmeasures() { return eng.state.measures.length; },
             get firstMeasure() { eng.counters.firstMeasure++; return eng.wrapMeasure(0); },

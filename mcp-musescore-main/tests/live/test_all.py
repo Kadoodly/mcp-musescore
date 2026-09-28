@@ -29,6 +29,10 @@ How to run
      you make in MuseScore are noticed (it asks you to change a note).
   4. Look at the bars it lists and save (or discard) the file.
 
+The score must be in 4/4 (at least its last bar). The last check changes the
+meter of the last two test bars (a time signature change once crashed
+MuseScore); --no-meter-check skips it.
+
 Exit code 0 = everything passed. Each check prints PASS/FAIL/SKIP with details.
 """
 
@@ -56,6 +60,10 @@ from src.notation import parse_notation, pitch_midi  # noqa: E402
 from src.validation import normalize_voice_events  # noqa: E402
 
 WHOLE = 1920
+
+
+class SetupRefused(Exception):
+    pass
 
 
 def canon(events):
@@ -94,8 +102,9 @@ def bar_lines(view, bar):
 # ---------------------------------------------------------------------------
 
 class AllFeatures:
-    def __init__(self, live, bars_to_add, cleanup, global_tools, interactive):
+    def __init__(self, live, bars_to_add, cleanup, global_tools, interactive, meter_check=True):
         self.live = live
+        self.meter_check = meter_check
         self.bars_to_add = bars_to_add
         self.cleanup = cleanup
         self.global_tools = global_tools
@@ -111,18 +120,17 @@ class AllFeatures:
         self.staves = a["numStaves"]
         self.original = json.dumps(a["measures"], sort_keys=True)
         self.header = {k: v for k, v in a.items() if k != "measures"}
+        meter = a["measures"][-1]["timeSignature"]
+        if meter != "4/4":
+            # The appended bars take the last bar's meter, and the tests are written in 4/4.
+            # (Changing the meter of the test bars first crashed MuseScore 4.7.5 in a live run;
+            # time_signature_change checks that on its own, at the very end.)
+            raise SetupRefused(f"The score ends in {meter}, but these tests need 4/4. In MuseScore create a new Piano "
+                               f"score in 4/4 (File > New) and save it with \"mcp test\" in its name, e.g. \"mcp test 44\". "
+                               f"Nothing was changed.")
         print(f"Score: {self.original_bars} bars, {self.staves} staves. Appending {self.bars_to_add} test bars.")
         await lv.tool("append_measure", count=self.bars_to_add)
         a = await lv.analysis(self.original_bars + 1)
-        meter = a["measures"][0]["timeSignature"]
-        if meter != "4/4":
-            # The appended bars take the last bar's meter; the tests are written
-            # in 4/4, so the test bars (only they) get a 4/4 time signature.
-            print(f"The score ends in {meter}: setting 4/4 on the test bars (from bar {self.original_bars + 1}).")
-            await lv.tool("set_time_signature", numerator=4, denominator=4, measure=self.original_bars + 1)
-            a = await lv.analysis(self.original_bars + 1)
-            # MuseScore re-bars the (empty) test bars: same total length, other bar count
-            print(f"  MuseScore re-barred them into {len(a['measures'])} bars of 4/4.")
         self.bars = {m["measure"]: (m["startTick"], m["endTick"]) for m in a["measures"]}
         lengths = sorted({e - s for s, e in self.bars.values()})
         if lengths != [WHOLE]:
@@ -422,22 +430,50 @@ class AllFeatures:
 
     # --------------------------------------------------------------------------------------
 
+    async def time_signature_change(self):
+        """Run last, after the original bars were checked: a time signature change crashed
+        MuseScore in a live run. It changes the last two (empty) test bars to 3/4 and back."""
+        lv = self.live
+        total = (await lv.analysis(1, 1))["numMeasures"]
+        bar = total - 1
+        if bar < self.next_bar or bar <= self.original_bars:
+            return "SKIP: no unused test bars left at the end"
+        a = await lv.analysis(bar)
+        if any(e["name"] != "Rest" for m in a["measures"] for els in m["elements"].values() for e in els):
+            return f"SKIP: bars {bar}-{total} aren't empty"
+        print(f"  (changing the meter of bars {bar}-{total}: if MuseScore crashes now, set_time_signature is the cause)")
+        await lv.tool("set_time_signature", numerator=3, denominator=4, measure=bar)
+        a = await lv.analysis(bar)
+        assert a["measures"][0]["timeSignature"] == "3/4", [m["timeSignature"] for m in a["measures"]]
+        # something after it: write into the re-barred bars, read them
+        await lv.tool("write_voice", notation="C5:q D5 E5", measure=bar, staff=0, voice=0)
+        line = bar_lines(await self.view(bar, staves=[0]), bar).get("s0")
+        assert line == "C5:q D5 E5", line
+        return f"bars {bar}-: 3/4 set ({len(a['measures'])} bars now), written and read back"
+
     async def finish(self):
         lv = self.live
         a = await lv.analysis(1, self.original_bars)
         assert json.dumps(a["measures"], sort_keys=True) == self.original, "THE ORIGINAL BARS CHANGED"
-        if self.cleanup:
-            total = (await lv.analysis(1, 1))["numMeasures"]
-            await lv.tool("delete_measures", start_measure=self.original_bars + 1, end_measure=total)
-            print("Deleted the test bars.")
         return "original bars unchanged"
 
+    async def cleanup_bars(self):
+        total = (await self.live.analysis(1, 1))["numMeasures"]
+        await self.live.tool("delete_measures", start_measure=self.original_bars + 1, end_measure=total)
+        return f"deleted the test bars {self.original_bars + 1}-{total}"
+
     async def run(self):
-        await self.setup()
+        try:
+            await self.setup()
+        except SetupRefused as e:
+            print(f"REFUSING TO RUN: {e}")
+            return 1
         checks = [n for n in dir(self) if n.startswith("test_")]
         checks.sort(key=lambda n: getattr(AllFeatures, n).__code__.co_firstlineno)
         failed = 0
-        for name in checks + ["finish"]:
+        steps = checks + ["finish"] + (["time_signature_change"] if self.meter_check else []) + \
+            (["cleanup_bars"] if self.cleanup else [])
+        for name in steps:
             try:
                 detail = await getattr(self, name)()
                 status = "SKIP" if str(detail).startswith("SKIP") else "PASS"
@@ -445,7 +481,11 @@ class AllFeatures:
                 failed += 1
                 status, detail = "FAIL", f"{type(e).__name__}: {e}"
             print(f"{status}  {name}: {detail}")
-        print(f"\n{len(checks) + 1 - failed}/{len(checks) + 1} passed. Test bars: {self.original_bars + 1}-"
+            if status == "FAIL" and "Not connected to MuseScore" in str(detail):
+                print(f"\nMuseScore stopped answering during: {self.live.last_call}\n"
+                      f"Stopping here. Did MuseScore crash? Restart it, open the score and run the plugin again.")
+                return failed
+        print(f"\n{len(steps) - failed}/{len(steps)} passed. Test bars: {self.original_bars + 1}-"
               f"{self.original_bars + self.bars_to_add}" + ("" if self.cleanup else " (kept: have a look, then save or discard)"))
         return failed
 
@@ -458,6 +498,8 @@ async def main():
                         help="also test title, instrument and system-lock tools (they restore what they change, "
                              "except that all system locks are removed)")
     parser.add_argument("--interactive", action="store_true", help="also check that your edits in MuseScore are noticed")
+    parser.add_argument("--no-meter-check", action="store_true",
+                        help="skip the final time signature check (it crashed MuseScore once)")
     args = parser.parse_args()
 
     # Results can contain note signs (♩); never fail printing them
@@ -469,7 +511,8 @@ async def main():
     import server
     logging.getLogger("MuseScoreMCP.Client").setLevel(logging.WARNING)
     logging.getLogger("MuseScoreMCP").setLevel(logging.WARNING)
-    failed = await AllFeatures(Live(server), args.bars, args.cleanup, args.global_tools, args.interactive).run()
+    failed = await AllFeatures(Live(server), args.bars, args.cleanup, args.global_tools, args.interactive,
+                               not args.no_meter_check).run()
     await server.client.close()
     return 1 if failed else 0
 

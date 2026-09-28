@@ -16,6 +16,9 @@ def setup_time_tempo_tools(mcp, client: MuseScoreClient):
         stay, but the bars after it are cut anew, so their number and numbering can change (e.g. 8 bars of
         3/4 become 6 bars of 4/4). Read the score again afterwards.
 
+        Make sure the user has saved the score first: in a live test MuseScore crashed right after a time
+        signature change made this way (the cause isn't confirmed yet).
+
         Args:
             numerator: Top number of time signature (beats per measure)
             denominator: Bottom number of time signature (note value that gets the beat)

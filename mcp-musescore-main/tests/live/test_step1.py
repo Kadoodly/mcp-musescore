@@ -171,9 +171,12 @@ class Live:
         self.server = server_module
         self.ToolError = ToolError
         self.results = []
+        self.last_call = None
 
     async def tool(self, name, **args):
         """Calls an MCP tool as Claude would; returns its dict result or raises ToolFailed."""
+        shown = ", ".join(f"{k}={v!r}"[:80] for k, v in args.items())
+        self.last_call = f"{name}({shown})"
         try:
             out = await self.server.mcp.call_tool(name, args)
         except self.ToolError as e:
@@ -528,6 +531,10 @@ class Step1:
                 failed += 1
                 status, detail = "FAIL", str(e)
             print(f"{status}  {name}: {detail}")
+            if status == "FAIL" and "Not connected to MuseScore" in str(detail):
+                print(f"\nMuseScore stopped answering during: {self.live.last_call}\n"
+                      f"Stopping here. Did MuseScore crash? Restart it, open the score and run the plugin again.")
+                return failed
         print(f"\n{len(checks) + 1 - failed}/{len(checks) + 1} passed. Test bars: {self.original_bars + 1}-{self.original_bars + self.bars_to_add}"
               + ("" if self.cleanup else " (kept: check the ties in MuseScore, then save)"))
         return failed
